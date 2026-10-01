@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+
+    <PackageId>TheDiscordList.DSharpPlus</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>TheDiscordList</Authors>
+    <Company>TheDiscordList</Company>
+    <Copyright>Copyright (c) 2026 TheDiscordList</Copyright>
+    <Description>Official TheDiscordList integration for DSharpPlus: auto-post server count, shard heartbeats and slash commands, and verify inbound webhooks. No dependencies beyond DSharpPlus.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://thediscordlist.com</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/TheDiscordList/integration-dsharpplus</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>discord;dsharpplus;discord-bot;thediscordlist;bot-list</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="DSharpPlus" Version="[4.4.0, 5.0.0)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <InternalsVisibleTo Include="TheDiscordList.DSharpPlus.Tests" />
+  </ItemGroup>
+
+</Project>
