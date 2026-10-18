@@ -37,12 +37,12 @@ internal abstract class Publisher : IDisposable
         set => _running = value;
     }
 
-    protected DateTimeOffset Now => Owner.Time.GetUtcNow();
+    protected TimeSpan Now => Owner.Now;
 
-    protected DateTimeOffset SuspendedUntil
+    protected TimeSpan SuspendedUntil
     {
-        get => new(Interlocked.Read(ref _suspendedUntilTicks), TimeSpan.Zero);
-        set => Interlocked.Exchange(ref _suspendedUntilTicks, value.UtcTicks);
+        get => TimeSpan.FromTicks(Interlocked.Read(ref _suspendedUntilTicks));
+        set => Interlocked.Exchange(ref _suspendedUntilTicks, value.Ticks);
     }
 
     protected string Name => Kind.ToString().ToLowerInvariant();
@@ -98,12 +98,13 @@ internal abstract class Publisher : IDisposable
     }
 
     /// <summary>
-    /// Sends one request, retrying transient failures. A backoff that would outlast the next
+    /// Sends one request, retrying transient failures. A retry that would land past the next
     /// tick is dropped instead: that tick carries fresher data, and a failed request still
     /// burns rate-limit budget.
     /// </summary>
     protected async Task<TdlPostResult> SendAsync(string path, object body, bool heartbeat, TimeSpan? nextTickIn = null)
     {
+        var nextTick = Now + nextTickIn;
         var outcome = default(Outcome);
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
@@ -114,7 +115,7 @@ internal abstract class Publisher : IDisposable
             }
 
             var delay = Backoff(attempt);
-            if (nextTickIn is { } next && delay >= next)
+            if (Now + delay >= nextTick)
             {
                 break;
             }
@@ -140,7 +141,7 @@ internal abstract class Publisher : IDisposable
 
             case OutcomeKind.Payload:
                 // The publisher stays enabled: the next tick may carry valid data.
-                var detail = TdlApiClient.Detail(outcome.Body);
+                var detail = TdlApiClient.Field(outcome.Body, "message") is { ValueKind: JsonValueKind.String } message ? message.GetString() : null;
                 ReportOnce(status ?? 422, $"TheDiscordList rejected the {Name} payload ({status}){(detail is null ? "." : ": " + detail)}");
                 return new(false, status);
 
@@ -245,8 +246,8 @@ internal sealed class StatsPublisher(TdlAutoposter owner) : Publisher(owner)
     private static readonly TimeSpan MinGapFloor = TimeSpan.FromSeconds(60);
 
     private readonly object _lock = new();
-    private DateTimeOffset? _lastPostAt;
-    private DateTimeOffset? _debounceCap;
+    private TimeSpan? _lastPostAt;
+    private TimeSpan? _debounceCap;
     private int? _lastCount;
     private int? _lastShardCount;
 
@@ -373,9 +374,11 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 {
     private static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan MaxInterval = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan OutOfBandGap = TimeSpan.FromSeconds(10);
     private const int JitterMilliseconds = 5000;
 
-    private long _intervalTicks = owner.Options.Heartbeat.Interval.Ticks;
+    private long _intervalTicks = Math.Clamp(owner.Options.Heartbeat.Interval.Ticks, MinInterval.Ticks, MaxInterval.Ticks);
+    private long _lastBeatTicks;
 
     public override TdlPublisherKind Kind => TdlPublisherKind.Heartbeat;
 
@@ -394,12 +397,16 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
         Schedule(TimeSpan.Zero);
     }
 
-    /// <summary>An out-of-band beat after a shard transition. Repeated calls coalesce.</summary>
+    /// <summary>
+    /// An out-of-band beat after a shard transition, at least <see cref="OutOfBandGap"/> after the
+    /// previous beat, so a flapping shard cannot outpace the rate limit. Repeated calls coalesce.
+    /// </summary>
     public void BeatSoon()
     {
         if (!IsDisabled)
         {
-            ScheduleIfRunning(TimeSpan.FromSeconds(1));
+            var due = TimeSpan.FromTicks(Interlocked.Read(ref _lastBeatTicks)) + OutOfBandGap - Now;
+            ScheduleIfRunning(due > TimeSpan.FromSeconds(1) ? due : TimeSpan.FromSeconds(1));
         }
     }
 
@@ -419,6 +426,7 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
         }
 
         var body = new HeartbeatBody(topology.ClusterId, clusterCount, shards);
+        Interlocked.Exchange(ref _lastBeatTicks, Now.Ticks);
         var result = await SendAsync($"/bots/{Owner.BotId}/heartbeat", body, heartbeat: true, Interval).ConfigureAwait(false);
         if (!IsDisabled)
         {
@@ -434,31 +442,16 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
     /// </summary>
     protected override TdlPostResult React(Outcome outcome)
     {
-        if (outcome.Kind == OutcomeKind.Ok && NextBeatWithin(outcome.Body) is { } seconds)
+        if (outcome.Kind == OutcomeKind.Ok
+            && TdlApiClient.Field(outcome.Body, "next_beat_within_seconds") is { ValueKind: JsonValueKind.Number } value
+            && value.TryGetDouble(out var seconds)
+            && seconds > 0)
         {
-            var proposed = TimeSpan.FromSeconds(seconds / 3).Ticks;
-            Interlocked.Exchange(ref _intervalTicks, Math.Clamp(proposed, MinInterval.Ticks, MaxInterval.Ticks));
+            var proposed = TimeSpan.FromSeconds(Math.Clamp(seconds / 3, MinInterval.TotalSeconds, MaxInterval.TotalSeconds));
+            Interlocked.Exchange(ref _intervalTicks, proposed.Ticks);
         }
 
         return base.React(outcome);
-    }
-
-    private static double? NextBeatWithin(string? body)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(body ?? string.Empty);
-            return document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("next_beat_within_seconds", out var value)
-                && value.ValueKind == JsonValueKind.Number
-                && value.GetDouble() is var seconds and > 0
-                ? seconds
-                : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
     }
 
     private void ScheduleNext()

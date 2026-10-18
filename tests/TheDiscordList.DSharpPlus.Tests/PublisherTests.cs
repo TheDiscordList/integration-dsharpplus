@@ -34,6 +34,16 @@ public sealed class RequestShapingTests
     }
 
     [Fact]
+    public async Task APastedBearerPrefixIsNotDoubled()
+    {
+        await using var h = new Harness(token: " Bearer tdl_token ");
+
+        await h.Poster.PostStatsAsync();
+
+        Assert.Equal("Bearer tdl_token", Assert.Single(h.Http.Sent).Authorization);
+    }
+
+    [Fact]
     public async Task HeartbeatOmitsAnUnknownLatency()
     {
         await using var h = new Harness();
@@ -211,6 +221,38 @@ public sealed class StatusHandlingTests
     }
 
     [Fact]
+    public async Task RateLimitSuspensionIsCappedAtAnHour()
+    {
+        await using var h = new Harness();
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "86400"));
+
+        await h.Poster.PostStatsAsync();
+        h.Http.Respond = _ => FakeHandler.Json(200, "{}");
+        await h.Advance(TimeSpan.FromMinutes(59), TimeSpan.FromMinutes(1));
+
+        Assert.Equal("suspended", (await h.Poster.PostCommandsAsync()).Skipped);
+
+        await h.Advance(TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(1));
+
+        Assert.True((await h.Poster.PostCommandsAsync()).Ok);
+    }
+
+    [Fact]
+    public async Task SuspensionsAndGapsIgnoreWallClockJumps()
+    {
+        var clock = new JumpingClock();
+        await using var h = new Harness(options => options.TimeProvider = clock);
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "120"));
+
+        await h.Poster.PostStatsAsync();
+        h.Http.Respond = _ => FakeHandler.Json(200, "{}");
+        clock.Jump = TimeSpan.FromHours(2);
+
+        Assert.Equal("suspended", (await h.Poster.PostCommandsAsync()).Skipped);
+        Assert.Equal("min-gap", (await h.Poster.PostStatsAsync()).Skipped);
+    }
+
+    [Fact]
     public async Task ServerErrorsAreRetriedWithBackoff()
     {
         await using var h = new Harness();
@@ -247,6 +289,48 @@ public sealed class StatusHandlingTests
 
         Assert.True(result.Ok);
         Assert.Equal(2, h.Http.Sent.Count);
+    }
+
+    [Theory]
+    [InlineData(408)]
+    [InlineData(425)]
+    public async Task TimeoutStatusesAreRetried(int status)
+    {
+        await using var h = new Harness();
+        var statuses = new Queue<int>([status, 200]);
+        h.Http.Respond = _ => FakeHandler.Json(statuses.Dequeue(), "{}");
+
+        Assert.True((await h.Drive(h.Poster.PostStatsAsync())).Ok);
+        Assert.Equal(2, h.Http.Sent.Count);
+    }
+
+    [Fact]
+    public async Task OtherClientErrorsAreNotRetried()
+    {
+        await using var h = new Harness();
+        h.Http.Respond = _ => FakeHandler.Json(413, """{"message":"Payload too large."}""");
+
+        var result = await h.Poster.PostStatsAsync();
+
+        Assert.Equal(new TdlPostResult(false, 413), result);
+        Assert.Single(h.Http.Sent);
+        Assert.False(Assert.Single(h.Errors).Retryable);
+    }
+
+    [Fact]
+    public async Task RetriesNeverRunPastTheNextTick()
+    {
+        await using var h = new Harness();
+        h.Http.Respond = _ =>
+        {
+            h.Time.Advance(TimeSpan.FromSeconds(30));
+            return FakeHandler.Json(503, "{}");
+        };
+
+        var result = await h.Drive(h.Poster.PostHeartbeatAsync());
+
+        Assert.Equal(new TdlPostResult(false, 503), result);
+        Assert.Single(h.Http.Sent);
     }
 
     [Fact]
@@ -359,6 +443,20 @@ public sealed class SafetyTests
         Assert.Single(h.Http.Sent);
         Assert.Equal("disposed", (await h.Poster.PostStatsAsync()).Skipped);
     }
+
+    [Fact]
+    public async Task DisposingDuringARetryBackoffReturnsDisposed()
+    {
+        var h = new Harness();
+        h.Http.Respond = _ => FakeHandler.Json(503, "{}");
+
+        var post = h.Poster.PostStatsAsync();
+        await Harness.Until(() => h.Http.Sent.Count == 1);
+        await h.Poster.DisposeAsync();
+
+        Assert.Equal("disposed", (await post).Skipped);
+        Assert.Empty(h.Errors);
+    }
 }
 
 public sealed class CadenceTests
@@ -457,7 +555,19 @@ public sealed class CadenceTests
     }
 
     [Fact]
-    public async Task ShardTransitionsBeatWithinASecond()
+    public async Task TheStartingHeartbeatIntervalIsClamped()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Interval = TimeSpan.FromSeconds(1));
+        h.Ready();
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 1);
+
+        await h.Advance(TimeSpan.FromSeconds(14));
+
+        Assert.Single(h.Http.To("heartbeat"));
+    }
+
+    [Fact]
+    public async Task ShardTransitionsBeatAtLeastTenSecondsAfterTheLastBeat()
     {
         await using var h = new Harness();
         h.Ready();
@@ -465,9 +575,17 @@ public sealed class CadenceTests
 
         h.Poster.OnShardTransition();
         h.Poster.OnShardTransition();
+        await h.Advance(TimeSpan.FromSeconds(9));
+        Assert.Single(h.Http.To("heartbeat"));
+
+        await h.Advance(TimeSpan.FromSeconds(1));
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 2);
+
+        await h.Advance(TimeSpan.FromSeconds(12));
+        h.Poster.OnShardTransition();
         await h.Advance(TimeSpan.FromSeconds(1));
 
-        await Harness.Until(() => h.Http.To("heartbeat").Count == 2);
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 3);
     }
 
     [Fact]
