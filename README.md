@@ -163,7 +163,8 @@ app.MapPost("/webhooks/tdl", async (HttpRequest request) =>
 });
 ```
 
-`examples/BasicBot` runs exactly this next to a bot.
+`examples/BasicBot` runs exactly this next to a bot, and maps the route only
+when `TDL_WEBHOOK_SECRET` is set.
 
 ### Verifying by hand
 
@@ -185,12 +186,15 @@ yourself rather than binding it to a model.
 
 `Verify` checks a two-sided 300-second window around the signature's `t`
 (tune with `tolerance:`), compares in constant time, and accepts upper-case hex.
+An empty or blank `secret` throws `ArgumentException` rather than checking
+against an empty key, so a missing environment variable fails closed.
 
 ### Events
 
 | Event | Fires for | `DataAs<T>()` |
 | --- | --- | --- |
 | `listing.bumped` | servers, bots | `TdlListingBumped` |
+| `listing.bump_ready` | servers, bots | `TdlListingBumpReady` |
 | `listing.upvoted` | servers, bots | `TdlListingUpvoted` |
 | `server.joined` | servers only | `TdlServerJoined` |
 | `bot.added` | bots | `TdlBotAdded` |
@@ -204,7 +208,8 @@ version does not know still parses.
 Two of them are not what their names suggest. `bot.added` is a **click** event,
 dispatched on the install hand-off — Discord never tells anyone whether the
 install completed. And `bot.stats_reported` is not an echo of your own POST: it
-also fires when the owner edits the listing in the web UI. `CreatedAt` is
+also fires when the owner edits the listing in the web UI, and when the server
+forwards your heartbeats' guild counts into stats. `CreatedAt` is
 enqueue time, not send time; never use it for freshness.
 
 ### Rules for a healthy endpoint
