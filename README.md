@@ -279,8 +279,8 @@ One-time setup:
 Each release:
 
 1. Move the `Unreleased` notes in `CHANGELOG.md` under the new version.
-2. `git tag v0.1.0 && git push origin v0.1.0`.
-3. The workflow tests, packs with `-p:Version=0.1.0`, exchanges its OIDC token
+2. `git tag v0.2.0 && git push origin v0.2.0`.
+3. The workflow tests, packs with `-p:Version=0.2.0`, exchanges its OIDC token
    for a short-lived key, and pushes the `.nupkg` and `.snupkg`.
 
 ## License
