@@ -235,11 +235,10 @@ enqueue time, not send time; never use it for freshness.
   suspends and re-probes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** Stats and commands share 60 requests a minute per
-  client IP, heartbeats get 120. A `429` suspends stats and commands together,
+  bot, heartbeats get 120. A `429` suspends stats and commands together,
   honouring `Retry-After` and `X-RateLimit-Reset` (60 seconds without either,
   never more than an hour); heartbeats bypass the
   suspension, because a stale number beats a false "down" on your status page.
-  On shared hosting, other bots behind the same egress IP count against you.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing; that publisher disables itself. A `401` is the bad-token
   signal, and it disables every publisher.

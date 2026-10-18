@@ -20,8 +20,8 @@ internal enum OutcomeKind
 internal readonly record struct Outcome(OutcomeKind Kind, int? Status, string? Body = null, string? Error = null);
 
 /// <summary>
-/// The one HTTP client every publisher shares. The server keeps a single rate-limit counter
-/// per client IP, so a 429 suspends stats and commands together. Heartbeats bypass the
+/// The one HTTP client every publisher shares. The server counts stats and commands against
+/// one per-bot budget, so a 429 suspends them together. Heartbeats bypass the
 /// suspension: a dropped stats post is a stale number, a dropped heartbeat is a false "down".
 /// </summary>
 internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token, string userAgent, TimeProvider time, CancellationToken stopping)
