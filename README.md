@@ -37,11 +37,12 @@ extension method. Either starts three publishers:
 | Publisher | What it sends | Cadence |
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after ready, then every 5 min, debounced on guild create/delete |
-| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus within a second of any shard's `Ready`, `Resumed`, `SocketOpened` or `SocketClosed` |
+| Heartbeat | per-shard status, latency and guild counts | every ~30s, plus an extra beat on any shard's `Ready`, `Resumed`, `SocketOpened` or `SocketClosed`, at least 10s after the last one |
 | Commands | your global application commands | once, ~10s after ready |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
+Surrounding whitespace and a pasted `Bearer ` prefix are stripped.
 
 **Call `AddTheDiscordList` before `ConnectAsync()` / `StartAsync()`.** DSharpPlus
 exposes no connection state, so the first `Ready` is what starts the publishers
@@ -163,7 +164,8 @@ app.MapPost("/webhooks/tdl", async (HttpRequest request) =>
 });
 ```
 
-`examples/BasicBot` runs exactly this next to a bot.
+`examples/BasicBot` runs exactly this next to a bot, and maps the route only
+when `TDL_WEBHOOK_SECRET` is set.
 
 ### Verifying by hand
 
@@ -185,12 +187,15 @@ yourself rather than binding it to a model.
 
 `Verify` checks a two-sided 300-second window around the signature's `t`
 (tune with `tolerance:`), compares in constant time, and accepts upper-case hex.
+An empty or blank `secret` throws `ArgumentException` rather than checking
+against an empty key, so a missing environment variable fails closed.
 
 ### Events
 
 | Event | Fires for | `DataAs<T>()` |
 | --- | --- | --- |
 | `listing.bumped` | servers, bots | `TdlListingBumped` |
+| `listing.bump_ready` | servers, bots | `TdlListingBumpReady` |
 | `listing.upvoted` | servers, bots | `TdlListingUpvoted` |
 | `server.joined` | servers only | `TdlServerJoined` |
 | `bot.added` | bots | `TdlBotAdded` |
@@ -204,7 +209,8 @@ version does not know still parses.
 Two of them are not what their names suggest. `bot.added` is a **click** event,
 dispatched on the install hand-off — Discord never tells anyone whether the
 install completed. And `bot.stats_reported` is not an echo of your own POST: it
-also fires when the owner edits the listing in the web UI. `CreatedAt` is
+also fires when the owner edits the listing in the web UI, and when the server
+forwards your heartbeats' guild counts into stats. `CreatedAt` is
 enqueue time, not send time; never use it for freshness.
 
 ### Rules for a healthy endpoint
@@ -229,15 +235,16 @@ enqueue time, not send time; never use it for freshness.
   suspends and re-probes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** Stats and commands share 60 requests a minute per
-  client IP, heartbeats get 120. A `429` suspends stats and commands together,
-  honouring `Retry-After` and `X-RateLimit-Reset`; heartbeats bypass the
+  bot, heartbeats get 120. A `429` suspends stats and commands together,
+  honouring `Retry-After` and `X-RateLimit-Reset` (60 seconds without either,
+  never more than an hour); heartbeats bypass the
   suspension, because a stale number beats a false "down" on your status page.
-  On shared hosting, other bots behind the same egress IP count against you.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing; that publisher disables itself. A `401` is the bad-token
   signal, and it disables every publisher.
-- `5xx`, timeouts (10 seconds) and network errors retry up to three times with
-  jittered exponential backoff, then wait for the next tick.
+- `408`, `425`, `5xx`, timeouts (10 seconds) and network errors retry up to
+  three times with jittered exponential backoff, never past the next tick. Any
+  other `4xx` is reported once and not retried.
 - Commands are read with `GetGlobalApplicationCommandsAsync()` (on the lowest
   shard of a sharded client). DSharpPlus 4.x does not model a command's `nsfw`
   flag, so it is not sent.
@@ -271,8 +278,8 @@ One-time setup:
 Each release:
 
 1. Move the `Unreleased` notes in `CHANGELOG.md` under the new version.
-2. `git tag v0.1.0 && git push origin v0.1.0`.
-3. The workflow tests, packs with `-p:Version=0.1.0`, exchanges its OIDC token
+2. `git tag v0.2.0 && git push origin v0.2.0`.
+3. The workflow tests, packs with `-p:Version=0.2.0`, exchanges its OIDC token
    for a short-lived key, and pushes the `.nupkg` and `.snupkg`.
 
 ## License

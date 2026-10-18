@@ -2,7 +2,7 @@
 //
 //   dotnet run --project examples/BasicBot
 //
-// Environment: DISCORD_TOKEN, TDL_TOKEN, and TDL_WEBHOOK_SECRET for the webhook route.
+// Environment: DISCORD_TOKEN, TDL_TOKEN, and TDL_WEBHOOK_SECRET; the webhook route is only mapped when it is set.
 using DSharpPlus;
 using TheDiscordList.DSharpPlus;
 
@@ -22,28 +22,35 @@ poster.Disabled += disabled => Console.WriteLine($"[tdl] {disabled.Publisher} di
 
 await client.ConnectAsync();
 
-var secret = Environment.GetEnvironmentVariable("TDL_WEBHOOK_SECRET") ?? string.Empty;
+var secret = Environment.GetEnvironmentVariable("TDL_WEBHOOK_SECRET");
 var app = WebApplication.Create(args);
 
-app.MapPost("/webhooks/tdl", async (HttpRequest request) =>
+if (string.IsNullOrWhiteSpace(secret))
 {
-    using var body = new MemoryStream();
-    await request.Body.CopyToAsync(body);
-    try
+    Console.WriteLine("[tdl] TDL_WEBHOOK_SECRET is not set; the webhook route is off.");
+}
+else
+{
+    app.MapPost("/webhooks/tdl", async (HttpRequest request) =>
     {
-        var webhook = TdlWebhook.Verify(body.ToArray(), request.Headers[TdlWebhook.SignatureHeader], secret);
-        if (webhook.Event == TdlWebhookEvents.ListingUpvoted)
+        using var body = new MemoryStream();
+        await request.Body.CopyToAsync(body);
+        try
         {
-            Console.WriteLine($"{webhook.DataAs<TdlListingUpvoted>()?.User?.Username ?? "Someone"} upvoted the bot.");
-        }
+            var webhook = TdlWebhook.Verify(body.ToArray(), request.Headers[TdlWebhook.SignatureHeader], secret);
+            if (webhook.Event == TdlWebhookEvents.ListingUpvoted)
+            {
+                Console.WriteLine($"{webhook.DataAs<TdlListingUpvoted>()?.User?.Username ?? "Someone"} upvoted the bot.");
+            }
 
-        return Results.NoContent();
-    }
-    catch (TdlWebhookException exception)
-    {
-        Console.WriteLine($"[tdl] rejected a webhook: {exception.Code}");
-        return Results.BadRequest();
-    }
-});
+            return Results.NoContent();
+        }
+        catch (TdlWebhookException exception)
+        {
+            Console.WriteLine($"[tdl] rejected a webhook: {exception.Code}");
+            return Results.BadRequest();
+        }
+    });
+}
 
 await app.RunAsync();

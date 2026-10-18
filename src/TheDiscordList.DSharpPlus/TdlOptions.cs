@@ -60,7 +60,7 @@ public sealed class TdlHeartbeatOptions
     /// <summary>Whether the publisher runs. Default <see langword="true"/>.</summary>
     public bool Enabled { get; set; } = true;
 
-    /// <summary>The starting cadence; the API's response retunes it. Default 30 seconds.</summary>
+    /// <summary>The starting cadence, clamped to 15 to 60 seconds; the API's response retunes it. Default 30 seconds.</summary>
     public TimeSpan Interval { get; set; } = TimeSpan.FromSeconds(30);
 }
 

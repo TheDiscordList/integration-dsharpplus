@@ -28,6 +28,12 @@ public sealed partial class TdlAutoposter : IAsyncDisposable
         Options = options ?? new TdlOptions();
         _botId = Options.BotId;
 
+        token = token?.Trim();
+        if (token is not null && token.StartsWith("Bearer ", StringComparison.Ordinal))
+        {
+            token = token["Bearer ".Length..].TrimStart();
+        }
+
         if (string.IsNullOrWhiteSpace(token))
         {
             WarnOnce("no-token", "No stats token supplied; auto-posting is disabled.");
@@ -35,7 +41,7 @@ public sealed partial class TdlAutoposter : IAsyncDisposable
         }
 
         var http = Options.HttpClient ?? (_ownedHttp = new HttpClient(new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(15) }));
-        _api = new TdlApiClient(http, Options.BaseUrl, token.Trim(), UserAgent, Options.TimeProvider, _stopping.Token);
+        _api = new TdlApiClient(http, Options.BaseUrl, token, UserAgent, Options.TimeProvider, _stopping.Token);
 
         if (Options.Stats.Enabled)
         {
@@ -75,6 +81,9 @@ public sealed partial class TdlAutoposter : IAsyncDisposable
     internal TdlApiClient Api => _api!;
 
     internal TimeProvider Time => Options.TimeProvider;
+
+    /// <summary>Monotonic, so a wall-clock jump never stretches or cuts a suspension or a gap.</summary>
+    internal TimeSpan Now => Time.GetElapsedTime(0);
 
     internal CancellationToken Stopping => _stopping.Token;
 

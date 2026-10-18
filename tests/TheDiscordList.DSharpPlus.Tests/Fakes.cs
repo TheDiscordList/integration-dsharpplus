@@ -63,6 +63,23 @@ internal sealed class FakeHost : ITdlHost
     public void Log(TdlLogLevel level, string message) => Logs.Enqueue($"{level}: {message}");
 }
 
+/// <summary>A clock whose wall time can jump while its monotonic time stands still.</summary>
+internal sealed class JumpingClock : TimeProvider
+{
+    private readonly FakeTimeProvider _inner = new(Harness.Epoch);
+
+    public TimeSpan Jump { get; set; }
+
+    public override long TimestampFrequency => _inner.TimestampFrequency;
+
+    public override DateTimeOffset GetUtcNow() => _inner.GetUtcNow() + Jump;
+
+    public override long GetTimestamp() => _inner.GetTimestamp();
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+        _inner.CreateTimer(callback, state, dueTime, period);
+}
+
 /// <summary>A poster wired to a fake host, a fake transport and a fake clock.</summary>
 internal sealed class Harness : IAsyncDisposable
 {

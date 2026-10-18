@@ -53,6 +53,12 @@ public sealed class WebhookTests
         Assert.Equal(TdlWebhookErrorCode.InvalidSignature, Fails(Body, $"t={T},v1={VectorV1}", secret: "whsec_other"));
 
     [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void EmptySecretIsAConfigurationError(string secret) =>
+        Assert.Equal("secret", Assert.Throws<ArgumentException>(() => TdlWebhook.Verify(Body, $"t={T},v1={VectorV1}", secret, timeProvider: At(T))).ParamName);
+
+    [Theory]
     [InlineData(301)]
     [InlineData(-301)]
     public void StaleTimestampFailsInBothDirections(long skew) =>
@@ -122,5 +128,16 @@ public sealed class WebhookTests
         var data = TdlWebhook.Verify(body, $"t={T},v1={Sign(body)}", Secret, timeProvider: At(T)).DataAs<TdlListingUpvoted>();
 
         Assert.Equal(new TdlListingUpvoted(DateTimeOffset.Parse("2026-08-14T12:34:56+00:00", System.Globalization.CultureInfo.InvariantCulture), 42, new TdlWebhookUser("7", "ada", null)), data);
+    }
+
+    [Fact]
+    public void BumpReadyDataIsTyped()
+    {
+        const string body = """{"id":"d4","event":"listing.bump_ready","created_at":"2026-08-14T12:34:56+00:00","listing":{"id":"9","type":"server","name":"S","url":"https://thediscordlist.com/servers/9"},"data":{"ready_at":"2026-08-14T12:34:56+00:00"}}""";
+
+        var webhook = TdlWebhook.Verify(body, $"t={T},v1={Sign(body)}", Secret, timeProvider: At(T));
+
+        Assert.Equal(TdlWebhookEvents.ListingBumpReady, webhook.Event);
+        Assert.Equal(new TdlListingBumpReady(DateTimeOffset.Parse("2026-08-14T12:34:56+00:00", System.Globalization.CultureInfo.InvariantCulture)), webhook.DataAs<TdlListingBumpReady>());
     }
 }

@@ -30,12 +30,18 @@ public static class TdlWebhook
     /// <param name="tolerance">The freshness window around <c>t</c>. Default 300 seconds.</param>
     /// <param name="timeProvider">The clock. Default <see cref="TimeProvider.System"/>.</param>
     /// <exception cref="TdlWebhookException">Verification failed; <see cref="TdlWebhookException.Code"/> says why.</exception>
+    /// <exception cref="ArgumentException"><paramref name="secret"/> is empty or blank: a configuration error, not a bad delivery.</exception>
     public static TdlWebhookEvent Verify(string rawBody, string? signatureHeader, string secret, TimeSpan? tolerance = null, TimeProvider? timeProvider = null) =>
         Verify(Encoding.UTF8.GetBytes(rawBody), signatureHeader, secret, tolerance, timeProvider);
 
     /// <inheritdoc cref="Verify(string, string?, string, TimeSpan?, TimeProvider?)"/>
     public static TdlWebhookEvent Verify(ReadOnlySpan<byte> rawBody, string? signatureHeader, string secret, TimeSpan? tolerance = null, TimeProvider? timeProvider = null)
     {
+        if (string.IsNullOrWhiteSpace(secret))
+        {
+            throw new ArgumentException("The webhook signing secret is empty, so no delivery can be verified. Copy it from the listing's Webhooks tab.", nameof(secret));
+        }
+
         if (string.IsNullOrWhiteSpace(signatureHeader))
         {
             throw new TdlWebhookException(TdlWebhookErrorCode.MissingSignature, $"Missing {SignatureHeader} header.");
@@ -167,6 +173,10 @@ public sealed record TdlWebhookUser(string? Id, string Username, string? Avatar)
 /// <param name="User">Who bumped it, when known.</param>
 public sealed record TdlListingBumped(int Points, DateTimeOffset BumpedAt, DateTimeOffset NextBumpAt, TdlWebhookUser? User);
 
+/// <summary><c>listing.bump_ready</c> data. Sent once per cooldown.</summary>
+/// <param name="ReadyAt">When the cooldown lifted.</param>
+public sealed record TdlListingBumpReady(DateTimeOffset ReadyAt);
+
 /// <summary><c>listing.upvoted</c> data.</summary>
 /// <param name="VotedAt">When the vote happened.</param>
 /// <param name="TotalUpvotes">The listing's new total.</param>
@@ -183,7 +193,7 @@ public sealed record TdlServerJoined(DateTimeOffset JoinedAt, TdlWebhookUser? Us
 /// <param name="User">Who clicked, when known.</param>
 public sealed record TdlBotAdded(DateTimeOffset AddedAt, TdlWebhookUser? User);
 
-/// <summary><c>bot.stats_reported</c> data. Also fires on manual edits, not only on your own posts.</summary>
+/// <summary><c>bot.stats_reported</c> data. Also fires on owner edits in the web UI and on the heartbeat's stats forward.</summary>
 /// <param name="GuildCount">The stored server count.</param>
 /// <param name="ShardCount">The stored shard count.</param>
 /// <param name="ReportedAt">When it was stored.</param>
@@ -198,6 +208,9 @@ public static class TdlWebhookEvents
 {
     /// <summary>Data: <see cref="TdlListingBumped"/>.</summary>
     public const string ListingBumped = "listing.bumped";
+
+    /// <summary>Data: <see cref="TdlListingBumpReady"/>.</summary>
+    public const string ListingBumpReady = "listing.bump_ready";
 
     /// <summary>Data: <see cref="TdlListingUpvoted"/>.</summary>
     public const string ListingUpvoted = "listing.upvoted";

@@ -20,8 +20,8 @@ internal enum OutcomeKind
 internal readonly record struct Outcome(OutcomeKind Kind, int? Status, string? Body = null, string? Error = null);
 
 /// <summary>
-/// The one HTTP client every publisher shares. The server keeps a single rate-limit counter
-/// per client IP, so a 429 suspends stats and commands together. Heartbeats bypass the
+/// The one HTTP client every publisher shares. The server counts stats and commands against
+/// one per-bot budget, so a 429 suspends them together. Heartbeats bypass the
 /// suspension: a dropped stats post is a stale number, a dropped heartbeat is a false "down".
 /// </summary>
 internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token, string userAgent, TimeProvider time, CancellationToken stopping)
@@ -34,12 +34,15 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
+    /// <summary>A broken or hostile rate-limit header must not park the client for days.</summary>
+    private static readonly TimeSpan MaxSuspension = TimeSpan.FromHours(1);
+
     private readonly string _baseUrl = baseUrl.TrimEnd('/');
     private long _suspendedUntilTicks;
 
     public async Task<Outcome> PostAsync(string path, object body, bool heartbeat)
     {
-        if (!heartbeat && time.GetUtcNow().UtcTicks < Interlocked.Read(ref _suspendedUntilTicks))
+        if (!heartbeat && time.GetElapsedTime(0).Ticks < Interlocked.Read(ref _suspendedUntilTicks))
         {
             return new(OutcomeKind.Dropped, null);
         }
@@ -96,42 +99,42 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
         403 => new(OutcomeKind.Plan, 403),
         // 404 is "unknown id, or the id belongs to a server listing". It never means a bad token.
         404 or 409 => new(OutcomeKind.Config, status),
-        400 or 422 => new(OutcomeKind.Payload, status, body),
         429 => new(OutcomeKind.Throttled, 429),
+        // 408 and 425 are worth a retry; any other 4xx answers the same request the same way again.
+        >= 400 and < 500 and not (408 or 425) => new(OutcomeKind.Payload, status, body),
         _ => new(OutcomeKind.Transient, status, Error: $"TheDiscordList responded {status}."),
     };
 
+    /// <summary>The headers are wall-clock; the suspension itself runs on the monotonic clock.</summary>
     private void Suspend(HttpResponseMessage response)
     {
         var now = time.GetUtcNow();
         var retryAfter = response.Headers.RetryAfter?.Delta ?? response.Headers.RetryAfter?.Date - now;
-        var until = now + (retryAfter > TimeSpan.Zero ? retryAfter.Value : TimeSpan.FromSeconds(60));
+        var wait = retryAfter > TimeSpan.Zero ? retryAfter.Value : TimeSpan.FromSeconds(60);
 
         if (response.Headers.TryGetValues("X-RateLimit-Reset", out var values)
             && long.TryParse(values.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out var reset)
             && reset is > 0 and < 253_402_300_800)
         {
-            var resetAt = DateTimeOffset.FromUnixTimeSeconds(reset);
-            if (resetAt > until)
+            var untilReset = DateTimeOffset.FromUnixTimeSeconds(reset) - now;
+            if (untilReset > wait)
             {
-                until = resetAt;
+                wait = untilReset;
             }
         }
 
-        until += TimeSpan.FromMilliseconds(Random.Shared.Next(0, 2001));
-        Interlocked.Exchange(ref _suspendedUntilTicks, until.UtcTicks);
+        wait = (wait < MaxSuspension ? wait : MaxSuspension) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 2001));
+        Interlocked.Exchange(ref _suspendedUntilTicks, (time.GetElapsedTime(0) + wait).Ticks);
     }
 
-    /// <summary>The <c>message</c> of a JSON error body, for logs.</summary>
-    public static string? Detail(string? body)
+    /// <summary>A top-level field of a JSON object body.</summary>
+    public static JsonElement? Field(string? body, string name)
     {
         try
         {
             using var document = JsonDocument.Parse(body ?? string.Empty);
-            return document.RootElement.ValueKind == JsonValueKind.Object
-                && document.RootElement.TryGetProperty("message", out var message)
-                && message.ValueKind == JsonValueKind.String
-                ? message.GetString()
+            return document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty(name, out var value)
+                ? value.Clone()
                 : null;
         }
         catch (JsonException)
