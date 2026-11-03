@@ -468,9 +468,12 @@ internal sealed class CommandsPublisher(TdlAutoposter owner) : Publisher(owner)
     /// <summary>Offset from the first stats post, because both share one server-side rate budget.</summary>
     public static readonly TimeSpan Delay = TimeSpan.FromSeconds(10);
 
+    /// <summary>How long after a failure that may pass the post is tried again.</summary>
+    public static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(5);
+
     public override TdlPublisherKind Kind => TdlPublisherKind.Commands;
 
-    /// <summary>Once per process: commands change on deploy, and a deploy is a restart.</summary>
+    /// <summary>Once per process, until it lands: commands change on deploy, and a deploy is a restart.</summary>
     public override void Start()
     {
         if (Owner.Topology.IsStatsPublisher)
@@ -489,6 +492,7 @@ internal sealed class CommandsPublisher(TdlAutoposter owner) : Publisher(owner)
         catch (Exception exception) when (!Owner.Stopping.IsCancellationRequested)
         {
             Owner.RaiseError(new(Kind, null, true, "Could not fetch the global application commands: " + exception.Message));
+            ScheduleIfRunning(RetryDelay);
             return Skip("fetch-failed");
         }
 
@@ -498,7 +502,19 @@ internal sealed class CommandsPublisher(TdlAutoposter owner) : Publisher(owner)
             return Skip("empty");
         }
 
-        return await SendAsync($"/bots/{Owner.BotId}/commands", new CommandsBody(commands), heartbeat: false, manual).ConfigureAwait(false);
+        return await SendAsync($"/bots/{Owner.BotId}/commands", new CommandsBody(commands), heartbeat: false, manual, RetryDelay).ConfigureAwait(false);
+    }
+
+    /// <summary>A plan suspension outlasts the retry; the tick then waits out the rest of it.</summary>
+    protected override TdlPostResult React(Outcome outcome)
+    {
+        var result = base.React(outcome);
+        if (outcome.Kind is OutcomeKind.Transient or OutcomeKind.Dropped or OutcomeKind.Throttled or OutcomeKind.Plan)
+        {
+            ScheduleIfRunning(RetryDelay);
+        }
+
+        return result;
     }
 }
 

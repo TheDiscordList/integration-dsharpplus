@@ -577,6 +577,96 @@ public sealed class CadenceTests
     }
 
     [Fact]
+    public async Task CommandsRetryFiveMinutesAfterAServerErrorUntilTheyLand()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        var status = 503;
+        h.Http.Respond = sent => FakeHandler.Json(sent.Url.EndsWith("/commands", StringComparison.Ordinal) ? status : 200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(30));
+        await Harness.Until(() => h.Http.To("commands").Count == 3);
+
+        status = 200;
+        await h.Advance(TimeSpan.FromMinutes(5));
+        await Harness.Until(() => h.Http.To("commands").Count == 4);
+        await h.Advance(TimeSpan.FromHours(1), TimeSpan.FromMinutes(1));
+
+        Assert.Equal(4, h.Http.To("commands").Count);
+    }
+
+    [Fact]
+    public async Task CommandsRetryAfterAFailedFetchFromDiscord()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        h.Host.CommandsError = new InvalidOperationException("Discord is down");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        await Harness.Until(() => h.Errors.Any(error => error.Publisher == TdlPublisherKind.Commands));
+        Assert.Empty(h.Http.To("commands"));
+
+        h.Host.CommandsError = null;
+        await h.Advance(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(30));
+
+        await Harness.Until(() => h.Http.To("commands").Count == 1);
+    }
+
+    [Fact]
+    public async Task CommandsRetryAfterTheSuspensionDroppedThem()
+    {
+        await using var h = new Harness(options =>
+        {
+            options.Heartbeat.Enabled = false;
+            options.Stats.Enabled = false;
+        });
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "60"));
+        await h.Poster.PostCommandsAsync();
+        h.Http.Respond = _ => FakeHandler.Json(200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        Assert.Single(h.Http.To("commands"));
+
+        await h.Advance(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(30));
+
+        await Harness.Until(() => h.Http.To("commands").Count == 2);
+    }
+
+    [Fact]
+    public async Task CommandsWaitOutAPlanSuspension()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        h.Http.Respond = sent => FakeHandler.Json(sent.Url.EndsWith("/commands", StringComparison.Ordinal) ? 403 : 200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        await Harness.Until(() => h.Http.To("commands").Count == 1);
+        await h.Advance(TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(1));
+        Assert.Single(h.Http.To("commands"));
+
+        await h.Advance(TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(1));
+
+        await Harness.Until(() => h.Http.To("commands").Count == 2);
+    }
+
+    [Theory]
+    [InlineData(422)]
+    [InlineData(404)]
+    public async Task ATerminalClientErrorEndsTheCommandRetries(int status)
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        h.Http.Respond = sent => FakeHandler.Json(sent.Url.EndsWith("/commands", StringComparison.Ordinal) ? status : 200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        await Harness.Until(() => h.Http.To("commands").Count == 1);
+        await h.Advance(TimeSpan.FromHours(1), TimeSpan.FromMinutes(1));
+
+        Assert.Single(h.Http.To("commands"));
+    }
+
+    [Fact]
     public async Task EmptyCommandListIsSentOnlyWhenAskedFor()
     {
         await using var h = new Harness();

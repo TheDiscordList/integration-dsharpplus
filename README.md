@@ -38,7 +38,7 @@ extension method. Either starts three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after ready, then every 5 min, debounced on guild create/delete |
 | Heartbeat | per-shard status, latency and guild counts | every ~30s, plus an extra beat on any shard's `Ready`, `Resumed`, `SocketOpened` or `SocketClosed`, at least 10s after the last one |
-| Commands | your global application commands | once, ~10s after ready |
+| Commands | your global application commands | once, ~10s after ready; again every 5 min until it lands, after a server error, a rate limit or a failed fetch from Discord |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
