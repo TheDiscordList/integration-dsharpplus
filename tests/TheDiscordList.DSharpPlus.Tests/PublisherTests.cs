@@ -634,6 +634,27 @@ public sealed class CadenceTests
     }
 
     [Fact]
+    public async Task ACommandsPostThatLandsEndsThePendingRetry()
+    {
+        await using var h = new Harness(options =>
+        {
+            options.Heartbeat.Enabled = false;
+            options.Stats.Enabled = false;
+        });
+        h.Ready();
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "1"));
+        await h.Poster.PostCommandsAsync();
+
+        h.Http.Respond = _ => FakeHandler.Json(200, "{}");
+        await h.Advance(TimeSpan.FromSeconds(5));
+        Assert.True((await h.Poster.PostCommandsAsync()).Ok);
+
+        await h.Advance(TimeSpan.FromHours(1), TimeSpan.FromMinutes(1));
+
+        Assert.Equal(2, h.Http.To("commands").Count);
+    }
+
+    [Fact]
     public async Task CommandsWaitOutAPlanSuspension()
     {
         await using var h = new Harness(options => options.Heartbeat.Enabled = false);
