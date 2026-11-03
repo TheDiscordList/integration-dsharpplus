@@ -380,6 +380,7 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 
     private long _intervalTicks = Math.Clamp(owner.Options.Heartbeat.Interval.Ticks, MinInterval.Ticks, MaxInterval.Ticks);
     private long _lastBeatTicks;
+    private int _beatSoonPending;
 
     public override TdlPublisherKind Kind => TdlPublisherKind.Heartbeat;
 
@@ -400,11 +401,13 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 
     /// <summary>
     /// An out-of-band beat after a shard transition, at least <see cref="OutOfBandGap"/> after the
-    /// previous beat, so a flapping shard cannot outpace the rate limit. Repeated calls coalesce.
+    /// previous beat, so a flapping shard cannot outpace the rate limit. Calls before it fires
+    /// coalesce into it: re-arming on each would let a mass reconnect postpone every beat, regular
+    /// ones included, past the server's grace window.
     /// </summary>
     public void BeatSoon()
     {
-        if (!IsDisabled)
+        if (!IsDisabled && Running && Interlocked.Exchange(ref _beatSoonPending, 1) == 0)
         {
             var due = TimeSpan.FromTicks(Interlocked.Read(ref _lastBeatTicks)) + OutOfBandGap - Now;
             ScheduleIfRunning(due > TimeSpan.FromSeconds(1) ? due : TimeSpan.FromSeconds(1));
@@ -413,6 +416,7 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 
     protected override async Task<TdlPostResult> RunAsync(bool manual)
     {
+        Volatile.Write(ref _beatSoonPending, 0);
         var topology = Owner.Topology;
         if (topology.ClusterCount is not int clusterCount)
         {

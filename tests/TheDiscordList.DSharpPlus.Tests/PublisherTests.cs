@@ -728,6 +728,23 @@ public sealed class CadenceTests
     }
 
     [Fact]
+    public async Task ABurstOfShardTransitionsCannotPostponeTheBeat()
+    {
+        await using var h = new Harness();
+        h.Ready();
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 1);
+        await h.Advance(TimeSpan.FromSeconds(11));
+
+        for (var i = 0; i < 4; i++)
+        {
+            h.Poster.OnShardTransition();
+            await h.Advance(TimeSpan.FromMilliseconds(500));
+        }
+
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 2);
+    }
+
+    [Fact]
     public async Task OnlyClusterZeroPostsStatsAndCommands()
     {
         await using var h = new Harness();
