@@ -203,6 +203,20 @@ public sealed class StatusHandlingTests
     }
 
     [Fact]
+    public async Task HeartbeatRateLimitLeavesStatsAndCommandsAlone()
+    {
+        await using var h = new Harness();
+        h.Http.Respond = sent => sent.Url.EndsWith("/heartbeat", StringComparison.Ordinal)
+            ? FakeHandler.Json(429, "{}", ("Retry-After", "120"))
+            : FakeHandler.Json(200, "{}");
+
+        Assert.Equal(new TdlPostResult(false, 429, "throttled"), await h.Poster.PostHeartbeatAsync());
+
+        Assert.True((await h.Poster.PostStatsAsync()).Ok);
+        Assert.True((await h.Poster.PostCommandsAsync()).Ok);
+    }
+
+    [Fact]
     public async Task RateLimitResetHeaderExtendsTheSuspension()
     {
         await using var h = new Harness();

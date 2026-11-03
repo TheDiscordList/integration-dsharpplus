@@ -21,8 +21,9 @@ internal readonly record struct Outcome(OutcomeKind Kind, int? Status, string? B
 
 /// <summary>
 /// The one HTTP client every publisher shares. The server counts stats and commands against
-/// one per-bot budget, so a 429 suspends them together. Heartbeats bypass the
-/// suspension: a dropped stats post is a stale number, a dropped heartbeat is a false "down".
+/// one per-bot budget, so a 429 on either suspends them together. Heartbeats have a limiter of
+/// their own, so they neither start nor honour the suspension: a dropped stats post is a stale
+/// number, a dropped heartbeat is a false "down".
 /// </summary>
 internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token, string userAgent, TimeProvider time, CancellationToken stopping)
 {
@@ -82,7 +83,7 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
             }
 
             var outcome = Classify(status, text);
-            if (outcome.Kind == OutcomeKind.Throttled)
+            if (outcome.Kind == OutcomeKind.Throttled && !heartbeat)
             {
                 Suspend(response);
             }
