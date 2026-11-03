@@ -29,14 +29,18 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
 {
     public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
+    public static readonly TimeSpan DefaultRetryAfter = TimeSpan.FromSeconds(60);
+
+    public static readonly TimeSpan RetryJitter = TimeSpan.FromSeconds(2);
+
+    /// <summary>A broken or hostile rate-limit header must not park the client for days.</summary>
+    public static readonly TimeSpan MaxSuspension = TimeSpan.FromHours(1);
+
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
-
-    /// <summary>A broken or hostile rate-limit header must not park the client for days.</summary>
-    private static readonly TimeSpan MaxSuspension = TimeSpan.FromHours(1);
 
     private readonly string _baseUrl = baseUrl.TrimEnd('/');
     private long _suspendedUntilTicks;
@@ -118,7 +122,7 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
     {
         var now = time.GetUtcNow();
         var retryAfter = response.Headers.RetryAfter?.Delta ?? response.Headers.RetryAfter?.Date - now;
-        var wait = retryAfter > TimeSpan.Zero ? retryAfter.Value : TimeSpan.FromSeconds(60);
+        var wait = retryAfter > TimeSpan.Zero ? retryAfter.Value : DefaultRetryAfter;
 
         if (response.Headers.TryGetValues("X-RateLimit-Reset", out var values)
             && long.TryParse(values.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out var reset)
@@ -131,7 +135,7 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
             }
         }
 
-        return (wait < MaxSuspension ? wait : MaxSuspension) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 2001));
+        return (wait < MaxSuspension ? wait : MaxSuspension) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, (int)RetryJitter.TotalMilliseconds + 1));
     }
 
     /// <summary>A top-level field of a JSON object body.</summary>

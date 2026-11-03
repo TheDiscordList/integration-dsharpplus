@@ -10,7 +10,11 @@ internal abstract class Publisher : IDisposable
 {
     public static readonly TimeSpan PlanReprobe = TimeSpan.FromMinutes(30);
 
-    private const int MaxAttempts = 3;
+    public const int MaxAttempts = 3;
+
+    public static readonly TimeSpan BackoffBase = TimeSpan.FromSeconds(1);
+
+    public static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
 
     private readonly ITimer _timer;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -77,7 +81,7 @@ internal abstract class Publisher : IDisposable
     public void Dispose() => _timer.Dispose();
 
     public static TimeSpan Backoff(int attempt) =>
-        TimeSpan.FromMilliseconds(Math.Min(1000 * Math.Pow(2, attempt), 30_000) * (0.5 + (Random.Shared.NextDouble() * 0.5)));
+        TimeSpan.FromMilliseconds(Math.Min(BackoffBase.TotalMilliseconds * Math.Pow(2, attempt), BackoffMax.TotalMilliseconds) * (0.5 + (Random.Shared.NextDouble() * 0.5)));
 
     protected static TdlPostResult Skip(string reason) => new(false, null, reason);
 
@@ -376,7 +380,7 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
     private static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan MaxInterval = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan OutOfBandGap = TimeSpan.FromSeconds(10);
-    private const int JitterMilliseconds = 5000;
+    public const int JitterMilliseconds = 5000;
 
     private long _intervalTicks = Math.Clamp(owner.Options.Heartbeat.Interval.Ticks, MinInterval.Ticks, MaxInterval.Ticks);
     private long _lastBeatTicks;
