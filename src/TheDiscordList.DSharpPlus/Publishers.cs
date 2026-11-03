@@ -319,8 +319,8 @@ internal sealed class StatsPublisher(TdlAutoposter owner) : Publisher(owner)
             return Skip("unmeasurable");
         }
 
-        // Every post re-indexes the listing and fires a bot.stats_reported webhook whether the
-        // number moved or not, and the server does not dedupe, so the skip happens here.
+        // The server ignores an unchanged count, no re-index and no webhook, so re-sending one
+        // would only burn the per-bot rate budget.
         if (count == _lastCount && topology.ShardCount == _lastShardCount && Now < _lastPostAt + ForceAfter)
         {
             ScheduleIfRunning(Interval);
