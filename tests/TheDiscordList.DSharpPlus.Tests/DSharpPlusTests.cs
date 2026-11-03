@@ -50,6 +50,20 @@ public sealed class DSharpPlusTests
     }
 
     [Fact]
+    public async Task OnlyACloseItWillNotReconnectFromReadsDisconnected()
+    {
+        using var client = Client();
+
+        Assert.Equal(TdlShard.Connecting, DSharpPlusHost.StatusAfterClose(client, 1006));
+        Assert.Equal(TdlShard.Connecting, DSharpPlusHost.StatusAfterClose(client, 4000));
+        Assert.Equal(TdlShard.Disconnected, DSharpPlusHost.StatusAfterClose(client, 4004));
+
+        await client.DisconnectAsync();
+
+        Assert.Equal(TdlShard.Disconnected, DSharpPlusHost.StatusAfterClose(client, 1000));
+    }
+
+    [Fact]
     public async Task ShardedClientBeforeStartHasNoShardsYet()
     {
         var client = new DiscordShardedClient(new DiscordConfiguration { Token = "offline" });

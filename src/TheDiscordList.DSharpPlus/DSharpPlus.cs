@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Reflection;
 using DSharpPlus;
 using DSharpPlus.Entities;
 using DSharpPlus.EventArgs;
@@ -91,7 +92,7 @@ public sealed partial class TdlAutoposter
 
     private Task OnSocketOpened(DiscordClient sender, SocketEventArgs args) => Transition(sender, TdlShard.Connecting);
 
-    private Task OnSocketClosed(DiscordClient sender, SocketCloseEventArgs args) => Transition(sender, TdlShard.Disconnected);
+    private Task OnSocketClosed(DiscordClient sender, SocketCloseEventArgs args) => Transition(sender, DSharpPlusHost.StatusAfterClose(sender, args.CloseCode));
 
     private Task OnGuildCreated(DiscordClient sender, GuildCreateEventArgs args) => GuildsChanged();
 
@@ -142,6 +143,14 @@ internal sealed class DSharpPlusHost(ILogger logger, Func<IEnumerable<DiscordCli
 {
     private static readonly EventId LogEvent = new(1900, "TheDiscordList");
 
+    /// <summary>
+    /// <c>DisconnectAsync()</c> switches <c>AutoReconnect</c> off, and only the client's private copy
+    /// of the configuration shows it. Unreadable means reconnecting, never a false down.
+    /// </summary>
+    private static readonly PropertyInfo? Configuration = typeof(BaseDiscordClient).GetProperty("Configuration", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    private static readonly PropertyInfo? AutoReconnect = typeof(DiscordConfiguration).GetProperty(nameof(DiscordConfiguration.AutoReconnect));
+
     /// <summary>DSharpPlus exposes no connection state, so it is tracked from gateway events.</summary>
     private readonly ConcurrentDictionary<int, string> _status = new();
 
@@ -169,6 +178,12 @@ internal sealed class DSharpPlusHost(ILogger logger, Func<IEnumerable<DiscordCli
     }
 
     public void SetStatus(int shardId, string status) => _status[shardId] = status;
+
+    /// <summary>Every close fires <c>SocketClosed</c>. This is the library's own test for whether it reconnects.</summary>
+    internal static string StatusAfterClose(DiscordClient shard, int closeCode) =>
+        closeCode is >= 4001 and < 5000 || (Configuration?.GetValue(shard) is { } configuration && AutoReconnect?.GetValue(configuration) is false)
+            ? TdlShard.Disconnected
+            : TdlShard.Connecting;
 
     public async Task<IReadOnlyList<TdlCommand>> GetCommandsAsync()
     {

@@ -248,8 +248,11 @@ enqueue time, not send time; never use it for freshness.
 - Commands are read with `GetGlobalApplicationCommandsAsync()` (on the lowest
   shard of a sharded client). DSharpPlus 4.x does not model a command's `nsfw`
   flag, so it is not sent.
-- A shard whose socket closes reads `disconnected` until DSharpPlus reconnects
-  it; a routine reconnect therefore shows briefly on the status page.
+- A shard reads `connecting` before its first `Ready` and while DSharpPlus
+  reconnects it. It reads `disconnected` only when DSharpPlus will not reconnect:
+  after `DisconnectAsync()`, with `AutoReconnect` off, or on a close code from
+  4001 to 4999. DSharpPlus keeps the first two private, so the package reads its
+  configuration by reflection, and an unreadable value counts as reconnecting.
 - Without `DiscordIntents.Guilds`, the guild cache stops moving after READY and
   the count silently drifts.
 
