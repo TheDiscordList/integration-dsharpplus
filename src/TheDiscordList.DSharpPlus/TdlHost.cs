@@ -49,7 +49,8 @@ internal sealed record TdlTopology(int ClusterId, int? ClusterCount, int ShardCo
     }
 }
 
-internal sealed record TdlShard(int Id, string Status, int? LatencyMs, int Guilds)
+/// <summary><c>Guilds</c> stays absent until the shard is ready: a booting shard's 0 would zero the public count.</summary>
+internal sealed record TdlShard(int Id, string Status, int? LatencyMs, int? Guilds)
 {
     public const string Ready = "ready";
     public const string Connecting = "connecting";

@@ -10,7 +10,11 @@ internal abstract class Publisher : IDisposable
 {
     public static readonly TimeSpan PlanReprobe = TimeSpan.FromMinutes(30);
 
-    private const int MaxAttempts = 3;
+    public const int MaxAttempts = 3;
+
+    public static readonly TimeSpan BackoffBase = TimeSpan.FromSeconds(1);
+
+    public static readonly TimeSpan BackoffMax = TimeSpan.FromSeconds(30);
 
     private readonly ITimer _timer;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -77,7 +81,7 @@ internal abstract class Publisher : IDisposable
     public void Dispose() => _timer.Dispose();
 
     public static TimeSpan Backoff(int attempt) =>
-        TimeSpan.FromMilliseconds(Math.Min(1000 * Math.Pow(2, attempt), 30_000) * (0.5 + (Random.Shared.NextDouble() * 0.5)));
+        TimeSpan.FromMilliseconds(Math.Min(BackoffBase.TotalMilliseconds * Math.Pow(2, attempt), BackoffMax.TotalMilliseconds) * (0.5 + (Random.Shared.NextDouble() * 0.5)));
 
     protected static TdlPostResult Skip(string reason) => new(false, null, reason);
 
@@ -98,29 +102,30 @@ internal abstract class Publisher : IDisposable
     }
 
     /// <summary>
-    /// Sends one request, retrying transient failures. A retry that would land past the next
-    /// tick is dropped instead: that tick carries fresher data, and a failed request still
-    /// burns rate-limit budget.
+    /// Sends one request, retrying transient failures and, once its window lifts, a 429. A retry
+    /// that would land past the next tick is dropped instead: that tick carries fresher data, and
+    /// a failed request still burns rate-limit budget. A manual post answers a 429 at once: its
+    /// caller may be a command handler, and a window can run for minutes.
     /// </summary>
-    protected async Task<TdlPostResult> SendAsync(string path, object body, bool heartbeat, TimeSpan? nextTickIn = null)
+    protected async Task<TdlPostResult> SendAsync(string path, object body, bool heartbeat, bool manual, TimeSpan? nextTickIn = null)
     {
         var nextTick = Now + nextTickIn;
         var outcome = default(Outcome);
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
-            outcome = await Owner.Api.PostAsync(path, body, heartbeat).ConfigureAwait(false);
-            if (outcome.Kind != OutcomeKind.Transient || attempt == MaxAttempts - 1)
+            outcome = await Owner.Api.PostAsync(path, body, heartbeat, waited: outcome.Kind == OutcomeKind.Throttled).ConfigureAwait(false);
+            var delay = outcome.Kind switch
+            {
+                OutcomeKind.Transient => Backoff(attempt),
+                OutcomeKind.Throttled when !manual => outcome.RetryAfter,
+                _ => null,
+            };
+            if (delay is null || attempt == MaxAttempts - 1 || Now + delay >= nextTick)
             {
                 break;
             }
 
-            var delay = Backoff(attempt);
-            if (Now + delay >= nextTick)
-            {
-                break;
-            }
-
-            await Task.Delay(delay, Owner.Time, Owner.Stopping).ConfigureAwait(false);
+            await Task.Delay(delay.Value, Owner.Time, Owner.Stopping).ConfigureAwait(false);
         }
 
         return React(outcome);
@@ -221,7 +226,7 @@ internal abstract class Publisher : IDisposable
         Owner.RaiseError(new(Kind, status, false, message));
     }
 
-    private void Cancel() => Change(Timeout.InfiniteTimeSpan);
+    protected void Cancel() => Change(Timeout.InfiniteTimeSpan);
 
     private void Change(TimeSpan due)
     {
@@ -314,8 +319,8 @@ internal sealed class StatsPublisher(TdlAutoposter owner) : Publisher(owner)
             return Skip("unmeasurable");
         }
 
-        // Every post re-indexes the listing and fires a bot.stats_reported webhook whether the
-        // number moved or not, and the server does not dedupe, so the skip happens here.
+        // The server ignores an unchanged count, no re-index and no webhook, so re-sending one
+        // would only burn the per-bot rate budget.
         if (count == _lastCount && topology.ShardCount == _lastShardCount && Now < _lastPostAt + ForceAfter)
         {
             ScheduleIfRunning(Interval);
@@ -326,7 +331,7 @@ internal sealed class StatsPublisher(TdlAutoposter owner) : Publisher(owner)
 
         // shard_count is always sent: the server stores an absent one as null.
         var body = new StatsBody(count.Value, topology.ShardCount);
-        var result = await SendAsync($"/bots/{Owner.BotId}/stats", body, heartbeat: false, Interval).ConfigureAwait(false);
+        var result = await SendAsync($"/bots/{Owner.BotId}/stats", body, heartbeat: false, manual, Interval).ConfigureAwait(false);
         if (result.Ok)
         {
             _lastCount = count;
@@ -375,10 +380,11 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
     private static readonly TimeSpan MinInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan MaxInterval = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan OutOfBandGap = TimeSpan.FromSeconds(10);
-    private const int JitterMilliseconds = 5000;
+    public const int JitterMilliseconds = 5000;
 
     private long _intervalTicks = Math.Clamp(owner.Options.Heartbeat.Interval.Ticks, MinInterval.Ticks, MaxInterval.Ticks);
     private long _lastBeatTicks;
+    private int _beatSoonPending;
 
     public override TdlPublisherKind Kind => TdlPublisherKind.Heartbeat;
 
@@ -399,11 +405,13 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 
     /// <summary>
     /// An out-of-band beat after a shard transition, at least <see cref="OutOfBandGap"/> after the
-    /// previous beat, so a flapping shard cannot outpace the rate limit. Repeated calls coalesce.
+    /// previous beat, so a flapping shard cannot outpace the rate limit. Calls before it fires
+    /// coalesce into it: re-arming on each would let a mass reconnect postpone every beat, regular
+    /// ones included, past the server's grace window.
     /// </summary>
     public void BeatSoon()
     {
-        if (!IsDisabled)
+        if (!IsDisabled && Running && Interlocked.Exchange(ref _beatSoonPending, 1) == 0)
         {
             var due = TimeSpan.FromTicks(Interlocked.Read(ref _lastBeatTicks)) + OutOfBandGap - Now;
             ScheduleIfRunning(due > TimeSpan.FromSeconds(1) ? due : TimeSpan.FromSeconds(1));
@@ -412,6 +420,7 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 
     protected override async Task<TdlPostResult> RunAsync(bool manual)
     {
+        Volatile.Write(ref _beatSoonPending, 0);
         var topology = Owner.Topology;
         if (topology.ClusterCount is not int clusterCount)
         {
@@ -427,7 +436,7 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 
         var body = new HeartbeatBody(topology.ClusterId, clusterCount, shards);
         Interlocked.Exchange(ref _lastBeatTicks, Now.Ticks);
-        var result = await SendAsync($"/bots/{Owner.BotId}/heartbeat", body, heartbeat: true, Interval).ConfigureAwait(false);
+        var result = await SendAsync($"/bots/{Owner.BotId}/heartbeat", body, heartbeat: true, manual, Interval).ConfigureAwait(false);
         if (!IsDisabled)
         {
             ScheduleNext();
@@ -467,9 +476,12 @@ internal sealed class CommandsPublisher(TdlAutoposter owner) : Publisher(owner)
     /// <summary>Offset from the first stats post, because both share one server-side rate budget.</summary>
     public static readonly TimeSpan Delay = TimeSpan.FromSeconds(10);
 
+    /// <summary>How long after a failure that may pass the post is tried again.</summary>
+    public static readonly TimeSpan RetryDelay = TimeSpan.FromMinutes(5);
+
     public override TdlPublisherKind Kind => TdlPublisherKind.Commands;
 
-    /// <summary>Once per process: commands change on deploy, and a deploy is a restart.</summary>
+    /// <summary>Once per process, until it lands: commands change on deploy, and a deploy is a restart.</summary>
     public override void Start()
     {
         if (Owner.Topology.IsStatsPublisher)
@@ -488,6 +500,7 @@ internal sealed class CommandsPublisher(TdlAutoposter owner) : Publisher(owner)
         catch (Exception exception) when (!Owner.Stopping.IsCancellationRequested)
         {
             Owner.RaiseError(new(Kind, null, true, "Could not fetch the global application commands: " + exception.Message));
+            ScheduleIfRunning(RetryDelay);
             return Skip("fetch-failed");
         }
 
@@ -497,7 +510,24 @@ internal sealed class CommandsPublisher(TdlAutoposter owner) : Publisher(owner)
             return Skip("empty");
         }
 
-        return await SendAsync($"/bots/{Owner.BotId}/commands", new CommandsBody(commands), heartbeat: false).ConfigureAwait(false);
+        return await SendAsync($"/bots/{Owner.BotId}/commands", new CommandsBody(commands), heartbeat: false, manual, RetryDelay).ConfigureAwait(false);
+    }
+
+    /// <summary>A plan suspension outlasts the retry; the tick then waits out the rest of it.</summary>
+    protected override TdlPostResult React(Outcome outcome)
+    {
+        var result = base.React(outcome);
+        if (outcome.Kind is OutcomeKind.Transient or OutcomeKind.Dropped or OutcomeKind.Throttled or OutcomeKind.Plan)
+        {
+            ScheduleIfRunning(RetryDelay);
+        }
+        else if (outcome.Kind == OutcomeKind.Ok)
+        {
+            // A pending retry would only post the same list again.
+            Cancel();
+        }
+
+        return result;
     }
 }
 
