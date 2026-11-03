@@ -245,6 +245,9 @@ enqueue time, not send time; never use it for freshness.
 - `408`, `425`, `5xx`, timeouts (10 seconds) and network errors retry up to
   three times with jittered exponential backoff, never past the next tick. Any
   other `4xx` is reported once and not retried.
+- A scheduled post that gets a `429` retries once the window lifts, if that lands
+  before its next tick. A manual `PostXAsync()` returns `throttled` at once, so
+  awaiting it never holds a command handler for the length of the window.
 - Commands are read with `GetGlobalApplicationCommandsAsync()` (on the lowest
   shard of a sharded client). DSharpPlus 4.x does not model a command's `nsfw`
   flag, so it is not sent.

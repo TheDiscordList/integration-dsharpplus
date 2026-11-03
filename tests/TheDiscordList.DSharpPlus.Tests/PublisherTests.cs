@@ -203,6 +203,41 @@ public sealed class StatusHandlingTests
     }
 
     [Fact]
+    public async Task AScheduledPostRetriesARateLimitOnceTheWindowLifts()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        var calls = 0;
+        h.Http.Respond = sent => sent.Url.EndsWith("/stats", StringComparison.Ordinal) && ++calls == 1
+            ? FakeHandler.Json(429, "{}", ("Retry-After", "5"))
+            : FakeHandler.Json(200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(6));
+        await Harness.Until(() => h.Http.To("stats").Count == 1);
+        await h.Advance(TimeSpan.FromSeconds(8));
+
+        await Harness.Until(() => h.Http.To("stats").Count == 2);
+        Assert.Contains(h.Posted, posted => posted.Publisher == TdlPublisherKind.Stats);
+    }
+
+    [Fact]
+    public async Task ARateLimitPastTheNextTickIsLeftToThatTick()
+    {
+        await using var h = new Harness();
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "120"));
+
+        h.Ready();
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 1);
+        await h.Advance(TimeSpan.FromSeconds(14));
+
+        Assert.Single(h.Http.To("heartbeat"));
+
+        await h.Advance(TimeSpan.FromSeconds(22));
+
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 2);
+    }
+
+    [Fact]
     public async Task HeartbeatRateLimitLeavesStatsAndCommandsAlone()
     {
         await using var h = new Harness();

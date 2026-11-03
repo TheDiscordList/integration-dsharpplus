@@ -17,7 +17,7 @@ internal enum OutcomeKind
     Dropped,
 }
 
-internal readonly record struct Outcome(OutcomeKind Kind, int? Status, string? Body = null, string? Error = null);
+internal readonly record struct Outcome(OutcomeKind Kind, int? Status, string? Body = null, string? Error = null, TimeSpan? RetryAfter = null);
 
 /// <summary>
 /// The one HTTP client every publisher shares. The server counts stats and commands against
@@ -41,9 +41,10 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
     private readonly string _baseUrl = baseUrl.TrimEnd('/');
     private long _suspendedUntilTicks;
 
-    public async Task<Outcome> PostAsync(string path, object body, bool heartbeat)
+    public async Task<Outcome> PostAsync(string path, object body, bool heartbeat, bool waited = false)
     {
-        if (!heartbeat && time.GetElapsedTime(0).Ticks < Interlocked.Read(ref _suspendedUntilTicks))
+        // A request that just waited out the window goes through it, even if its timer fired a tick early.
+        if (!heartbeat && !waited && time.GetElapsedTime(0).Ticks < Interlocked.Read(ref _suspendedUntilTicks))
         {
             return new(OutcomeKind.Dropped, null);
         }
@@ -83,9 +84,15 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
             }
 
             var outcome = Classify(status, text);
-            if (outcome.Kind == OutcomeKind.Throttled && !heartbeat)
+            if (outcome.Kind == OutcomeKind.Throttled)
             {
-                Suspend(response);
+                var wait = RetryWindow(response);
+                if (!heartbeat)
+                {
+                    Interlocked.Exchange(ref _suspendedUntilTicks, (time.GetElapsedTime(0) + wait).Ticks);
+                }
+
+                return outcome with { RetryAfter = wait };
             }
 
             return outcome;
@@ -106,8 +113,8 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
         _ => new(OutcomeKind.Transient, status, Error: $"TheDiscordList responded {status}."),
     };
 
-    /// <summary>The headers are wall-clock; the suspension itself runs on the monotonic clock.</summary>
-    private void Suspend(HttpResponseMessage response)
+    /// <summary>The headers are wall-clock; the wait itself runs on the monotonic clock.</summary>
+    private TimeSpan RetryWindow(HttpResponseMessage response)
     {
         var now = time.GetUtcNow();
         var retryAfter = response.Headers.RetryAfter?.Delta ?? response.Headers.RetryAfter?.Date - now;
@@ -124,8 +131,7 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
             }
         }
 
-        wait = (wait < MaxSuspension ? wait : MaxSuspension) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 2001));
-        Interlocked.Exchange(ref _suspendedUntilTicks, (time.GetElapsedTime(0) + wait).Ticks);
+        return (wait < MaxSuspension ? wait : MaxSuspension) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 2001));
     }
 
     /// <summary>A top-level field of a JSON object body.</summary>

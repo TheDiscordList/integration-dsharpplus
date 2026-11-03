@@ -98,29 +98,30 @@ internal abstract class Publisher : IDisposable
     }
 
     /// <summary>
-    /// Sends one request, retrying transient failures. A retry that would land past the next
-    /// tick is dropped instead: that tick carries fresher data, and a failed request still
-    /// burns rate-limit budget.
+    /// Sends one request, retrying transient failures and, once its window lifts, a 429. A retry
+    /// that would land past the next tick is dropped instead: that tick carries fresher data, and
+    /// a failed request still burns rate-limit budget. A manual post answers a 429 at once: its
+    /// caller may be a command handler, and a window can run for minutes.
     /// </summary>
-    protected async Task<TdlPostResult> SendAsync(string path, object body, bool heartbeat, TimeSpan? nextTickIn = null)
+    protected async Task<TdlPostResult> SendAsync(string path, object body, bool heartbeat, bool manual, TimeSpan? nextTickIn = null)
     {
         var nextTick = Now + nextTickIn;
         var outcome = default(Outcome);
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
-            outcome = await Owner.Api.PostAsync(path, body, heartbeat).ConfigureAwait(false);
-            if (outcome.Kind != OutcomeKind.Transient || attempt == MaxAttempts - 1)
+            outcome = await Owner.Api.PostAsync(path, body, heartbeat, waited: outcome.Kind == OutcomeKind.Throttled).ConfigureAwait(false);
+            var delay = outcome.Kind switch
+            {
+                OutcomeKind.Transient => Backoff(attempt),
+                OutcomeKind.Throttled when !manual => outcome.RetryAfter,
+                _ => null,
+            };
+            if (delay is null || attempt == MaxAttempts - 1 || Now + delay >= nextTick)
             {
                 break;
             }
 
-            var delay = Backoff(attempt);
-            if (Now + delay >= nextTick)
-            {
-                break;
-            }
-
-            await Task.Delay(delay, Owner.Time, Owner.Stopping).ConfigureAwait(false);
+            await Task.Delay(delay.Value, Owner.Time, Owner.Stopping).ConfigureAwait(false);
         }
 
         return React(outcome);
@@ -326,7 +327,7 @@ internal sealed class StatsPublisher(TdlAutoposter owner) : Publisher(owner)
 
         // shard_count is always sent: the server stores an absent one as null.
         var body = new StatsBody(count.Value, topology.ShardCount);
-        var result = await SendAsync($"/bots/{Owner.BotId}/stats", body, heartbeat: false, Interval).ConfigureAwait(false);
+        var result = await SendAsync($"/bots/{Owner.BotId}/stats", body, heartbeat: false, manual, Interval).ConfigureAwait(false);
         if (result.Ok)
         {
             _lastCount = count;
@@ -427,7 +428,7 @@ internal sealed class HeartbeatPublisher(TdlAutoposter owner) : Publisher(owner)
 
         var body = new HeartbeatBody(topology.ClusterId, clusterCount, shards);
         Interlocked.Exchange(ref _lastBeatTicks, Now.Ticks);
-        var result = await SendAsync($"/bots/{Owner.BotId}/heartbeat", body, heartbeat: true, Interval).ConfigureAwait(false);
+        var result = await SendAsync($"/bots/{Owner.BotId}/heartbeat", body, heartbeat: true, manual, Interval).ConfigureAwait(false);
         if (!IsDisabled)
         {
             ScheduleNext();
@@ -497,7 +498,7 @@ internal sealed class CommandsPublisher(TdlAutoposter owner) : Publisher(owner)
             return Skip("empty");
         }
 
-        return await SendAsync($"/bots/{Owner.BotId}/commands", new CommandsBody(commands), heartbeat: false).ConfigureAwait(false);
+        return await SendAsync($"/bots/{Owner.BotId}/commands", new CommandsBody(commands), heartbeat: false, manual).ConfigureAwait(false);
     }
 }
 
