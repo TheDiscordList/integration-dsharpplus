@@ -286,8 +286,8 @@ Each release:
 
 1. Bump `<Version>` in the csproj and move the `Unreleased` notes in
    `CHANGELOG.md` under the new version. Merge that to `main`.
-2. `git tag v0.2.0 && git push origin v0.2.0`.
-3. The workflow checks the tag, tests, packs with `-p:Version=0.2.0`, exchanges
+2. `git tag v0.2.1 && git push origin v0.2.1`.
+3. The workflow checks the tag, tests, packs with `-p:Version=0.2.1`, exchanges
    its OIDC token for a short-lived key, and pushes the `.nupkg` and `.snupkg`.
 
 ## License
