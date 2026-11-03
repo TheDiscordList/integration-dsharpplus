@@ -19,7 +19,7 @@ public sealed class DSharpPlusTests
         await using var poster = client.AddTheDiscordList("tdl_token", Offline());
 
         Assert.Equal(new TdlTopology(0, 1, 1, true), poster.Topology);
-        Assert.Equal(new TdlShard(0, TdlShard.Connecting, null, 0), Assert.Single(poster.Host.Shards));
+        Assert.Equal(new TdlShard(0, TdlShard.Connecting, null, null), Assert.Single(poster.Host.Shards));
         Assert.Null(poster.Host.LocalServerCount);
     }
 

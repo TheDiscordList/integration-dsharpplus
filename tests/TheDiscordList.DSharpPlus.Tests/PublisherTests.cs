@@ -44,11 +44,11 @@ public sealed class RequestShapingTests
     }
 
     [Fact]
-    public async Task HeartbeatOmitsAnUnknownLatency()
+    public async Task HeartbeatOmitsAnUnknownLatencyAndGuildCount()
     {
         await using var h = new Harness();
         h.Host.Topology = new(1, 3, 6, false);
-        h.Host.Shards = [new(2, TdlShard.Ready, 87, 1500), new(3, TdlShard.Connecting, null, 0)];
+        h.Host.Shards = [new(2, TdlShard.Ready, 87, 1500), new(3, TdlShard.Connecting, null, null)];
 
         var result = await h.Poster.PostHeartbeatAsync();
 
@@ -56,7 +56,7 @@ public sealed class RequestShapingTests
         var sent = Assert.Single(h.Http.Sent);
         Assert.Equal("https://thediscordlist.com/api/bots/123/heartbeat", sent.Url);
         Assert.Equal(
-            """{"cluster":1,"cluster_count":3,"shards":[{"id":2,"status":"ready","latency_ms":87,"guilds":1500},{"id":3,"status":"connecting","guilds":0}]}""",
+            """{"cluster":1,"cluster_count":3,"shards":[{"id":2,"status":"ready","latency_ms":87,"guilds":1500},{"id":3,"status":"connecting"}]}""",
             sent.Body);
     }
 

@@ -220,6 +220,6 @@ internal sealed class DSharpPlusHost(ILogger logger, Func<IEnumerable<DiscordCli
     {
         var status = Status(shard);
         var latency = status == TdlShard.Ready ? TdlShard.Latency(shard.Ping) : null;
-        return new TdlShard(shard.ShardId, status, latency, shard.Guilds.Count);
+        return new TdlShard(shard.ShardId, status, latency, status == TdlShard.Ready ? shard.Guilds.Count : null);
     }
 }
