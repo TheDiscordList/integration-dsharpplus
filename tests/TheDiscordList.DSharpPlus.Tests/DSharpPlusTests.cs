@@ -64,6 +64,12 @@ public sealed class DSharpPlusTests
     }
 
     [Fact]
+    public void AConfigurationThatCannotBeReadMeansReconnecting()
+    {
+        Assert.Equal(TdlShard.Connecting, DSharpPlusHost.StatusAfterClose(new object(), 1006));
+    }
+
+    [Fact]
     public async Task ShardedClientBeforeStartHasNoShardsYet()
     {
         var client = new DiscordShardedClient(new DiscordConfiguration { Token = "offline" });

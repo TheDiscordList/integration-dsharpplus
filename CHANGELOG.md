@@ -6,7 +6,8 @@
 
 - A shard whose socket closes reads `disconnected` only when DSharpPlus will not
   reconnect it, and `connecting` otherwise, so a routine reconnect no longer opens
-  a public incident.
+  a public incident. If that cannot be read it reads `connecting`, rather than
+  staying `ready`.
 - A shard's `guilds` is left out until that shard is ready, so a restart's first
   beat can no longer zero the public server count.
 - The commands post comes back 5 minutes after a server error, a rate limit, a

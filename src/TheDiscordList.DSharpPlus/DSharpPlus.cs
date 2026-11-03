@@ -180,8 +180,8 @@ internal sealed class DSharpPlusHost(ILogger logger, Func<IEnumerable<DiscordCli
     public void SetStatus(int shardId, string status) => _status[shardId] = status;
 
     /// <summary>Every close fires <c>SocketClosed</c>. This is the library's own test for whether it reconnects.</summary>
-    internal static string StatusAfterClose(DiscordClient shard, int closeCode) =>
-        closeCode is >= 4001 and < 5000 || (Configuration?.GetValue(shard) is { } configuration && AutoReconnect?.GetValue(configuration) is false)
+    internal static string StatusAfterClose(object shard, int closeCode) =>
+        closeCode is >= 4001 and < 5000 || AutoReconnectIsOff(shard)
             ? TdlShard.Disconnected
             : TdlShard.Connecting;
 
@@ -212,6 +212,18 @@ internal sealed class DSharpPlusHost(ILogger logger, Func<IEnumerable<DiscordCli
             option.Choices is { Count: > 0 } choices ? choices.Select(choice => new TdlCommandChoice(choice.Name, choice.Value)).ToList() : null,
             Map(option.Options))).ToList();
         return list is { Count: > 0 } ? list : null;
+    }
+
+    private static bool AutoReconnectIsOff(object shard)
+    {
+        try
+        {
+            return Configuration?.GetValue(shard) is { } configuration && AutoReconnect?.GetValue(configuration) is false;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private string Status(DiscordClient shard) => _status.TryGetValue(shard.ShardId, out var status) ? status : TdlShard.Connecting;
