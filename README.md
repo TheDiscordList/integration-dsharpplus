@@ -270,7 +270,8 @@ enqueue time, not send time; never use it for freshness.
 
 Releases publish from `.github/workflows/release.yml` on a `v*` tag, using
 NuGet trusted publishing (OIDC through `NuGet/login`): no long-lived API key
-lives in the repository. The package version comes from the tag.
+lives in the repository. The tag must point at a commit on `main` and match
+`<Version>` in the csproj, or the workflow stops before publishing.
 
 One-time setup:
 
@@ -283,10 +284,11 @@ One-time setup:
 
 Each release:
 
-1. Move the `Unreleased` notes in `CHANGELOG.md` under the new version.
+1. Bump `<Version>` in the csproj and move the `Unreleased` notes in
+   `CHANGELOG.md` under the new version. Merge that to `main`.
 2. `git tag v0.2.0 && git push origin v0.2.0`.
-3. The workflow tests, packs with `-p:Version=0.2.0`, exchanges its OIDC token
-   for a short-lived key, and pushes the `.nupkg` and `.snupkg`.
+3. The workflow checks the tag, tests, packs with `-p:Version=0.2.0`, exchanges
+   its OIDC token for a short-lived key, and pushes the `.nupkg` and `.snupkg`.
 
 ## License
 
