@@ -1,0 +1,9 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- DSharpPlus 4.x pulls System.Net.Security 4.3.0 (GHSA-6xh7-4v2w-36q6 and others) via
+         System.Net.WebSockets.Client. net8.0 ships its own copy, so prune the package from the graph. -->
+    <RestoreEnablePackagePruning>true</RestoreEnablePackagePruning>
+  </PropertyGroup>
+
+</Project>
