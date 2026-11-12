@@ -44,11 +44,11 @@ public sealed class RequestShapingTests
     }
 
     [Fact]
-    public async Task HeartbeatOmitsAnUnknownLatency()
+    public async Task HeartbeatOmitsAnUnknownLatencyAndGuildCount()
     {
         await using var h = new Harness();
         h.Host.Topology = new(1, 3, 6, false);
-        h.Host.Shards = [new(2, TdlShard.Ready, 87, 1500), new(3, TdlShard.Connecting, null, 0)];
+        h.Host.Shards = [new(2, TdlShard.Ready, 87, 1500), new(3, TdlShard.Connecting, null, null)];
 
         var result = await h.Poster.PostHeartbeatAsync();
 
@@ -56,7 +56,7 @@ public sealed class RequestShapingTests
         var sent = Assert.Single(h.Http.Sent);
         Assert.Equal("https://thediscordlist.com/api/bots/123/heartbeat", sent.Url);
         Assert.Equal(
-            """{"cluster":1,"cluster_count":3,"shards":[{"id":2,"status":"ready","latency_ms":87,"guilds":1500},{"id":3,"status":"connecting","guilds":0}]}""",
+            """{"cluster":1,"cluster_count":3,"shards":[{"id":2,"status":"ready","latency_ms":87,"guilds":1500},{"id":3,"status":"connecting"}]}""",
             sent.Body);
     }
 
@@ -199,6 +199,55 @@ public sealed class StatusHandlingTests
 
         await h.Advance(TimeSpan.FromSeconds(123), TimeSpan.FromSeconds(10));
 
+        Assert.True((await h.Poster.PostCommandsAsync()).Ok);
+    }
+
+    [Fact]
+    public async Task AScheduledPostRetriesARateLimitOnceTheWindowLifts()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        var calls = 0;
+        h.Http.Respond = sent => sent.Url.EndsWith("/stats", StringComparison.Ordinal) && ++calls == 1
+            ? FakeHandler.Json(429, "{}", ("Retry-After", "5"))
+            : FakeHandler.Json(200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(6));
+        await Harness.Until(() => h.Http.To("stats").Count == 1);
+        await h.Advance(TimeSpan.FromSeconds(8));
+
+        await Harness.Until(() => h.Http.To("stats").Count == 2);
+        Assert.Contains(h.Posted, posted => posted.Publisher == TdlPublisherKind.Stats);
+    }
+
+    [Fact]
+    public async Task ARateLimitPastTheNextTickIsLeftToThatTick()
+    {
+        await using var h = new Harness();
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "120"));
+
+        h.Ready();
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 1);
+        await h.Advance(TimeSpan.FromSeconds(14));
+
+        Assert.Single(h.Http.To("heartbeat"));
+
+        await h.Advance(TimeSpan.FromSeconds(22));
+
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 2);
+    }
+
+    [Fact]
+    public async Task HeartbeatRateLimitLeavesStatsAndCommandsAlone()
+    {
+        await using var h = new Harness();
+        h.Http.Respond = sent => sent.Url.EndsWith("/heartbeat", StringComparison.Ordinal)
+            ? FakeHandler.Json(429, "{}", ("Retry-After", "120"))
+            : FakeHandler.Json(200, "{}");
+
+        Assert.Equal(new TdlPostResult(false, 429, "throttled"), await h.Poster.PostHeartbeatAsync());
+
+        Assert.True((await h.Poster.PostStatsAsync()).Ok);
         Assert.True((await h.Poster.PostCommandsAsync()).Ok);
     }
 
@@ -528,6 +577,117 @@ public sealed class CadenceTests
     }
 
     [Fact]
+    public async Task CommandsRetryFiveMinutesAfterAServerErrorUntilTheyLand()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        var status = 503;
+        h.Http.Respond = sent => FakeHandler.Json(sent.Url.EndsWith("/commands", StringComparison.Ordinal) ? status : 200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(30));
+        await Harness.Until(() => h.Http.To("commands").Count == 3);
+
+        status = 200;
+        await h.Advance(TimeSpan.FromMinutes(5));
+        await Harness.Until(() => h.Http.To("commands").Count == 4);
+        await h.Advance(TimeSpan.FromHours(1), TimeSpan.FromMinutes(1));
+
+        Assert.Equal(4, h.Http.To("commands").Count);
+    }
+
+    [Fact]
+    public async Task CommandsRetryAfterAFailedFetchFromDiscord()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        h.Host.CommandsError = new InvalidOperationException("Discord is down");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        await Harness.Until(() => h.Errors.Any(error => error.Publisher == TdlPublisherKind.Commands));
+        Assert.Empty(h.Http.To("commands"));
+
+        h.Host.CommandsError = null;
+        await h.Advance(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(30));
+
+        await Harness.Until(() => h.Http.To("commands").Count == 1);
+    }
+
+    [Fact]
+    public async Task CommandsRetryAfterTheSuspensionDroppedThem()
+    {
+        await using var h = new Harness(options =>
+        {
+            options.Heartbeat.Enabled = false;
+            options.Stats.Enabled = false;
+        });
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "60"));
+        await h.Poster.PostCommandsAsync();
+        h.Http.Respond = _ => FakeHandler.Json(200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        Assert.Single(h.Http.To("commands"));
+
+        await h.Advance(TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(30));
+
+        await Harness.Until(() => h.Http.To("commands").Count == 2);
+    }
+
+    [Fact]
+    public async Task ACommandsPostThatLandsEndsThePendingRetry()
+    {
+        await using var h = new Harness(options =>
+        {
+            options.Heartbeat.Enabled = false;
+            options.Stats.Enabled = false;
+        });
+        h.Ready();
+        h.Http.Respond = _ => FakeHandler.Json(429, "{}", ("Retry-After", "1"));
+        await h.Poster.PostCommandsAsync();
+
+        h.Http.Respond = _ => FakeHandler.Json(200, "{}");
+        await h.Advance(TimeSpan.FromSeconds(5));
+        Assert.True((await h.Poster.PostCommandsAsync()).Ok);
+
+        await h.Advance(TimeSpan.FromHours(1), TimeSpan.FromMinutes(1));
+
+        Assert.Equal(2, h.Http.To("commands").Count);
+    }
+
+    [Fact]
+    public async Task CommandsWaitOutAPlanSuspension()
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        h.Http.Respond = sent => FakeHandler.Json(sent.Url.EndsWith("/commands", StringComparison.Ordinal) ? 403 : 200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        await Harness.Until(() => h.Http.To("commands").Count == 1);
+        await h.Advance(TimeSpan.FromMinutes(29), TimeSpan.FromMinutes(1));
+        Assert.Single(h.Http.To("commands"));
+
+        await h.Advance(TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(1));
+
+        await Harness.Until(() => h.Http.To("commands").Count == 2);
+    }
+
+    [Theory]
+    [InlineData(422)]
+    [InlineData(404)]
+    public async Task ATerminalClientErrorEndsTheCommandRetries(int status)
+    {
+        await using var h = new Harness(options => options.Heartbeat.Enabled = false);
+        h.Http.Respond = sent => FakeHandler.Json(sent.Url.EndsWith("/commands", StringComparison.Ordinal) ? status : 200, "{}");
+
+        h.Ready();
+        await h.Advance(TimeSpan.FromSeconds(11));
+        await Harness.Until(() => h.Http.To("commands").Count == 1);
+        await h.Advance(TimeSpan.FromHours(1), TimeSpan.FromMinutes(1));
+
+        Assert.Single(h.Http.To("commands"));
+    }
+
+    [Fact]
     public async Task EmptyCommandListIsSentOnlyWhenAskedFor()
     {
         await using var h = new Harness();
@@ -586,6 +746,23 @@ public sealed class CadenceTests
         await h.Advance(TimeSpan.FromSeconds(1));
 
         await Harness.Until(() => h.Http.To("heartbeat").Count == 3);
+    }
+
+    [Fact]
+    public async Task ABurstOfShardTransitionsCannotPostponeTheBeat()
+    {
+        await using var h = new Harness();
+        h.Ready();
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 1);
+        await h.Advance(TimeSpan.FromSeconds(11));
+
+        for (var i = 0; i < 4; i++)
+        {
+            h.Poster.OnShardTransition();
+            await h.Advance(TimeSpan.FromMilliseconds(500));
+        }
+
+        await Harness.Until(() => h.Http.To("heartbeat").Count == 2);
     }
 
     [Fact]

@@ -58,7 +58,10 @@ internal sealed class FakeHost : ITdlHost
 
     public ConcurrentQueue<string> Logs { get; } = new();
 
-    public Task<IReadOnlyList<TdlCommand>> GetCommandsAsync() => Task.FromResult<IReadOnlyList<TdlCommand>>(Commands);
+    public Exception? CommandsError { get; set; }
+
+    public Task<IReadOnlyList<TdlCommand>> GetCommandsAsync() =>
+        CommandsError is { } error ? Task.FromException<IReadOnlyList<TdlCommand>>(error) : Task.FromResult<IReadOnlyList<TdlCommand>>(Commands);
 
     public void Log(TdlLogLevel level, string message) => Logs.Enqueue($"{level}: {message}");
 }

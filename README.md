@@ -38,7 +38,7 @@ extension method. Either starts three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5s after ready, then every 5 min, debounced on guild create/delete |
 | Heartbeat | per-shard status, latency and guild counts | every ~30s, plus an extra beat on any shard's `Ready`, `Resumed`, `SocketOpened` or `SocketClosed`, at least 10s after the last one |
-| Commands | your global application commands | once, ~10s after ready |
+| Commands | your global application commands | once, ~10s after ready; again every 5 min until it lands, after a server error, a rate limit or a failed fetch from Discord |
 
 Your **stats token** is on the listing's manage page, under the API tab. It is
 scoped to one listing, so it is the only credential this package needs.
@@ -234,22 +234,28 @@ enqueue time, not send time; never use it for freshness.
 - **Heartbeats need Gold or higher.** On a `403` the heartbeat publisher
   suspends and re-probes every 30 minutes rather than disabling: the plan is
   checked per request, so a bot can gain it mid-run.
-- **Rate limits are shared.** Stats and commands share 60 requests a minute per
-  bot, heartbeats get 120. A `429` suspends stats and commands together,
-  honouring `Retry-After` and `X-RateLimit-Reset` (60 seconds without either,
-  never more than an hour); heartbeats bypass the
-  suspension, because a stale number beats a false "down" on your status page.
+- **Stats and commands share a rate limit** of 60 requests a minute per bot. A
+  `429` on either suspends both, honouring `Retry-After` and `X-RateLimit-Reset`
+  (60 seconds without either, never more than an hour). Heartbeats have a limiter
+  of their own, so they neither start nor honour that suspension: a stale number
+  beats a false "down" on your status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to a
   server listing; that publisher disables itself. A `401` is the bad-token
   signal, and it disables every publisher.
 - `408`, `425`, `5xx`, timeouts (10 seconds) and network errors retry up to
   three times with jittered exponential backoff, never past the next tick. Any
   other `4xx` is reported once and not retried.
+- A scheduled post that gets a `429` retries once the window lifts, if that lands
+  before its next tick. A manual `PostXAsync()` returns `throttled` at once, so
+  awaiting it never holds a command handler for the length of the window.
 - Commands are read with `GetGlobalApplicationCommandsAsync()` (on the lowest
   shard of a sharded client). DSharpPlus 4.x does not model a command's `nsfw`
   flag, so it is not sent.
-- A shard whose socket closes reads `disconnected` until DSharpPlus reconnects
-  it; a routine reconnect therefore shows briefly on the status page.
+- A shard reads `connecting` before its first `Ready` and while DSharpPlus
+  reconnects it. It reads `disconnected` only when DSharpPlus will not reconnect:
+  after `DisconnectAsync()`, with `AutoReconnect` off, or on a close code from
+  4001 to 4999. DSharpPlus keeps the first two private, so the package reads its
+  configuration by reflection, and an unreadable value counts as reconnecting.
 - Without `DiscordIntents.Guilds`, the guild cache stops moving after READY and
   the count silently drifts.
 
@@ -264,7 +270,8 @@ enqueue time, not send time; never use it for freshness.
 
 Releases publish from `.github/workflows/release.yml` on a `v*` tag, using
 NuGet trusted publishing (OIDC through `NuGet/login`): no long-lived API key
-lives in the repository. The package version comes from the tag.
+lives in the repository. The tag must point at a commit on `main` and match
+`<Version>` in the csproj, or the workflow stops before publishing.
 
 One-time setup:
 
@@ -277,10 +284,11 @@ One-time setup:
 
 Each release:
 
-1. Move the `Unreleased` notes in `CHANGELOG.md` under the new version.
-2. `git tag v0.2.0 && git push origin v0.2.0`.
-3. The workflow tests, packs with `-p:Version=0.2.0`, exchanges its OIDC token
-   for a short-lived key, and pushes the `.nupkg` and `.snupkg`.
+1. Bump `<Version>` in the csproj and move the `Unreleased` notes in
+   `CHANGELOG.md` under the new version. Merge that to `main`.
+2. `git tag v0.2.1 && git push origin v0.2.1`.
+3. The workflow checks the tag, tests, packs with `-p:Version=0.2.1`, exchanges
+   its OIDC token for a short-lived key, and pushes the `.nupkg` and `.snupkg`.
 
 ## License
 

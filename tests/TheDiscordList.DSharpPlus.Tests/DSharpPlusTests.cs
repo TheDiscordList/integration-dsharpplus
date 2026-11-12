@@ -19,7 +19,7 @@ public sealed class DSharpPlusTests
         await using var poster = client.AddTheDiscordList("tdl_token", Offline());
 
         Assert.Equal(new TdlTopology(0, 1, 1, true), poster.Topology);
-        Assert.Equal(new TdlShard(0, TdlShard.Connecting, null, 0), Assert.Single(poster.Host.Shards));
+        Assert.Equal(new TdlShard(0, TdlShard.Connecting, null, null), Assert.Single(poster.Host.Shards));
         Assert.Null(poster.Host.LocalServerCount);
     }
 
@@ -47,6 +47,26 @@ public sealed class DSharpPlusTests
         host.SetStatus(0, TdlShard.Disconnected);
 
         Assert.Null(host.LocalServerCount);
+    }
+
+    [Fact]
+    public async Task OnlyACloseItWillNotReconnectFromReadsDisconnected()
+    {
+        using var client = Client();
+
+        Assert.Equal(TdlShard.Connecting, DSharpPlusHost.StatusAfterClose(client, 1006));
+        Assert.Equal(TdlShard.Connecting, DSharpPlusHost.StatusAfterClose(client, 4000));
+        Assert.Equal(TdlShard.Disconnected, DSharpPlusHost.StatusAfterClose(client, 4004));
+
+        await client.DisconnectAsync();
+
+        Assert.Equal(TdlShard.Disconnected, DSharpPlusHost.StatusAfterClose(client, 1000));
+    }
+
+    [Fact]
+    public void AConfigurationThatCannotBeReadMeansReconnecting()
+    {
+        Assert.Equal(TdlShard.Connecting, DSharpPlusHost.StatusAfterClose(new object(), 1006));
     }
 
     [Fact]

@@ -17,16 +17,24 @@ internal enum OutcomeKind
     Dropped,
 }
 
-internal readonly record struct Outcome(OutcomeKind Kind, int? Status, string? Body = null, string? Error = null);
+internal readonly record struct Outcome(OutcomeKind Kind, int? Status, string? Body = null, string? Error = null, TimeSpan? RetryAfter = null);
 
 /// <summary>
 /// The one HTTP client every publisher shares. The server counts stats and commands against
-/// one per-bot budget, so a 429 suspends them together. Heartbeats bypass the
-/// suspension: a dropped stats post is a stale number, a dropped heartbeat is a false "down".
+/// one per-bot budget, so a 429 on either suspends them together. Heartbeats have a limiter of
+/// their own, so they neither start nor honour the suspension: a dropped stats post is a stale
+/// number, a dropped heartbeat is a false "down".
 /// </summary>
 internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token, string userAgent, TimeProvider time, CancellationToken stopping)
 {
     public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
+
+    public static readonly TimeSpan DefaultRetryAfter = TimeSpan.FromSeconds(60);
+
+    public static readonly TimeSpan RetryJitter = TimeSpan.FromSeconds(2);
+
+    /// <summary>A broken or hostile rate-limit header must not park the client for days.</summary>
+    public static readonly TimeSpan MaxSuspension = TimeSpan.FromHours(1);
 
     public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     {
@@ -34,15 +42,13 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
-    /// <summary>A broken or hostile rate-limit header must not park the client for days.</summary>
-    private static readonly TimeSpan MaxSuspension = TimeSpan.FromHours(1);
-
     private readonly string _baseUrl = baseUrl.TrimEnd('/');
     private long _suspendedUntilTicks;
 
-    public async Task<Outcome> PostAsync(string path, object body, bool heartbeat)
+    public async Task<Outcome> PostAsync(string path, object body, bool heartbeat, bool waited = false)
     {
-        if (!heartbeat && time.GetElapsedTime(0).Ticks < Interlocked.Read(ref _suspendedUntilTicks))
+        // A request that just waited out the window goes through it, even if its timer fired a tick early.
+        if (!heartbeat && !waited && time.GetElapsedTime(0).Ticks < Interlocked.Read(ref _suspendedUntilTicks))
         {
             return new(OutcomeKind.Dropped, null);
         }
@@ -84,7 +90,13 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
             var outcome = Classify(status, text);
             if (outcome.Kind == OutcomeKind.Throttled)
             {
-                Suspend(response);
+                var wait = RetryWindow(response);
+                if (!heartbeat)
+                {
+                    Interlocked.Exchange(ref _suspendedUntilTicks, (time.GetElapsedTime(0) + wait).Ticks);
+                }
+
+                return outcome with { RetryAfter = wait };
             }
 
             return outcome;
@@ -105,12 +117,12 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
         _ => new(OutcomeKind.Transient, status, Error: $"TheDiscordList responded {status}."),
     };
 
-    /// <summary>The headers are wall-clock; the suspension itself runs on the monotonic clock.</summary>
-    private void Suspend(HttpResponseMessage response)
+    /// <summary>The headers are wall-clock; the wait itself runs on the monotonic clock.</summary>
+    private TimeSpan RetryWindow(HttpResponseMessage response)
     {
         var now = time.GetUtcNow();
         var retryAfter = response.Headers.RetryAfter?.Delta ?? response.Headers.RetryAfter?.Date - now;
-        var wait = retryAfter > TimeSpan.Zero ? retryAfter.Value : TimeSpan.FromSeconds(60);
+        var wait = retryAfter > TimeSpan.Zero ? retryAfter.Value : DefaultRetryAfter;
 
         if (response.Headers.TryGetValues("X-RateLimit-Reset", out var values)
             && long.TryParse(values.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out var reset)
@@ -123,8 +135,7 @@ internal sealed class TdlApiClient(HttpClient http, string baseUrl, string token
             }
         }
 
-        wait = (wait < MaxSuspension ? wait : MaxSuspension) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 2001));
-        Interlocked.Exchange(ref _suspendedUntilTicks, (time.GetElapsedTime(0) + wait).Ticks);
+        return (wait < MaxSuspension ? wait : MaxSuspension) + TimeSpan.FromMilliseconds(Random.Shared.Next(0, (int)RetryJitter.TotalMilliseconds + 1));
     }
 
     /// <summary>A top-level field of a JSON object body.</summary>

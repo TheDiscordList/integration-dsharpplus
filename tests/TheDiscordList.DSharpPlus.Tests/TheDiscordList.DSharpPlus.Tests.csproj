@@ -26,4 +26,8 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="fixtures/sdk-conformance.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
