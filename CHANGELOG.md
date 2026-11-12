@@ -19,8 +19,15 @@
   before its next tick. A manual post still returns `throttled` at once.
 - A heartbeat `429` no longer suspends stats and commands.
 - A burst of shard transitions can no longer postpone the heartbeat.
-- The release workflow pins its actions to commit SHAs and refuses a tag that is
-  not on `main` or does not match the csproj version.
+- The release workflow refuses a tag that is not on `main` or does not match the
+  csproj version.
+- CI and release run on `actions/checkout` v7 and `actions/setup-dotnet` v6,
+  referenced by version tag. Dependabot keeps them current.
+- Restore prunes packages the runtime already ships, which drops the vulnerable
+  `System.Net.Security` 4.3.0 that DSharpPlus 4.x pulls in from the build graph.
+- Tests run against Microsoft.NET.Test.Sdk 18.11.0, xunit.runner.visualstudio
+  4.0.1 and Microsoft.Extensions.TimeProvider.Testing 10.11.0. The package's own
+  dependencies are unchanged.
 
 ## 0.2.0
 
